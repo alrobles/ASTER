@@ -4,7 +4,9 @@ From: nvidia/cuda:12.4.1-devel-ubuntu22.04
 %labels
     org.aster.role accelerator_cuda
     org.aster.cuda 12.4.1
-    org.aster.hip_headers 6.4.3
+    org.aster.hip_common_headers 6.4.3
+    org.aster.hip_amd_headers 6.4.3
+    org.aster.hip_nvidia_headers 6.4.3
     org.aster.gpu_required false
     org.aster.runtime "apptainer exec --nv <sif>"
 
@@ -25,11 +27,40 @@ From: nvidia/cuda:12.4.1-devel-ubuntu22.04
 
     git clone --branch rocm-6.4.3 --depth 1 \
         https://github.com/ROCm/HIP.git /opt/hip
+    git clone --branch rocm-6.4.3 --depth 1 \
+        https://github.com/ROCm/clr.git /opt/clr
+    git clone --branch rocm-6.4.3 --depth 1 \
+        https://github.com/ROCm/hipother.git /opt/hipother
+    cp -a /opt/clr/hipamd/include/hip/amd_detail \
+        /opt/hip/include/hip/
+    cp -a /opt/hipother/hipnv/include/hip/nvidia_detail \
+        /opt/hip/include/hip/
+
+    HIP_VERSION_MAJOR="$(sed -n '2p' /opt/hip/VERSION)"
+    HIP_VERSION_MINOR="$(sed -n '4p' /opt/hip/VERSION)"
+    HIP_VERSION_PATCH="$(sed -n '6p' /opt/hip/VERSION)"
+    HIP_VERSION_GITHASH="$(git -C /opt/hip rev-parse --short=12 HEAD)"
+    cat > /opt/hip/include/hip/hip_version.h <<EOF
+#ifndef HIP_VERSION_H
+#define HIP_VERSION_H
+#define HIP_VERSION_MAJOR ${HIP_VERSION_MAJOR}
+#define HIP_VERSION_MINOR ${HIP_VERSION_MINOR}
+#define HIP_VERSION_PATCH ${HIP_VERSION_PATCH}
+#define HIP_VERSION_GITHASH "${HIP_VERSION_GITHASH}"
+#define HIP_VERSION_BUILD_ID 0
+#define HIP_VERSION_BUILD_NAME ""
+#define HIP_VERSION (HIP_VERSION_MAJOR * 10000000 + HIP_VERSION_MINOR * 100000 + HIP_VERSION_PATCH)
+#endif
+EOF
 
     mkdir -p /opt/aster
     nvcc --version | tail -2 > /opt/aster/toolchain.txt
-    printf "hip_headers_commit=" >> /opt/aster/toolchain.txt
+    printf "hip_common_headers_commit=" >> /opt/aster/toolchain.txt
     git -C /opt/hip rev-parse HEAD >> /opt/aster/toolchain.txt
+    printf "hip_amd_headers_commit=" >> /opt/aster/toolchain.txt
+    git -C /opt/clr rev-parse HEAD >> /opt/aster/toolchain.txt
+    printf "hip_nvidia_headers_commit=" >> /opt/aster/toolchain.txt
+    git -C /opt/hipother rev-parse HEAD >> /opt/aster/toolchain.txt
     echo "base=nvidia/cuda:12.4.1-devel-ubuntu22.04" \
         >> /opt/aster/toolchain.txt
 

@@ -12,6 +12,15 @@ set -euo pipefail
 ROOT="${SLURM_SUBMIT_DIR}"
 SIF="${CASTER_SIF:-/beegfs/a474r867/ASTER/images/caster-rocm.sif}"
 
+apptainer exec --bind /beegfs:/beegfs "$SIF" \
+    make -C "$ROOT" -f GNUmakefile caster-site-accelerator-reference
+
+apptainer exec --bind /beegfs:/beegfs "$SIF" \
+    "$ROOT/bin/caster-site-accelerator-reference" \
+    -t 4 --seed 233 --accelerator-moves 240 \
+    --accelerator-batch-moves 80 --accelerator-score-every 8 \
+    "$ROOT/example/example.phylip"
+
 apptainer exec --rocm --bind /beegfs:/beegfs "$SIF" \
     make -C "$ROOT" -f GNUmakefile caster-site-accelerator-hip HIP_ARCH=gfx90a
 
