@@ -21,7 +21,8 @@ command -v apptainer >/dev/null 2>&1 || {
     exit 1
 }
 
-export APPTAINER_CACHEDIR="${APPTAINER_CACHEDIR:-${TMPDIR:-/tmp}/apptainer-cache-$(id -u)}"
+CACHE_INSTANCE="${SLURM_JOB_ID:-$$}"
+export APPTAINER_CACHEDIR="${APPTAINER_CACHEDIR:-${TMPDIR:-/tmp}/apptainer-cache-$(id -u)-${CACHE_INSTANCE}}"
 mkdir -p "$APPTAINER_CACHEDIR"
 
 echo "recipe=$DEF"
