@@ -460,39 +460,39 @@ private:
 
     void release() {
         if (hostPartials != nullptr) {
-            hipHostFree(hostPartials);
+            (void) hipHostFree(hostPartials);
             hostPartials = nullptr;
         }
         if (hostOperations != nullptr) {
-            hipHostFree(hostOperations);
+            (void) hipHostFree(hostOperations);
             hostOperations = nullptr;
         }
         if (devicePartials != nullptr) {
-            hipFree(devicePartials);
+            (void) hipFree(devicePartials);
             devicePartials = nullptr;
         }
         if (deviceCounts != nullptr) {
-            hipFree(deviceCounts);
+            (void) hipFree(deviceCounts);
             deviceCounts = nullptr;
         }
         if (deviceOperations != nullptr) {
-            hipFree(deviceOperations);
+            (void) hipFree(deviceOperations);
             deviceOperations = nullptr;
         }
         if (deviceSitePartitions != nullptr) {
-            hipFree(deviceSitePartitions);
+            (void) hipFree(deviceSitePartitions);
             deviceSitePartitions = nullptr;
         }
         if (deviceSpeciesRanges != nullptr) {
-            hipFree(deviceSpeciesRanges);
+            (void) hipFree(deviceSpeciesRanges);
             deviceSpeciesRanges = nullptr;
         }
         if (devicePartitions != nullptr) {
-            hipFree(devicePartitions);
+            (void) hipFree(devicePartitions);
             devicePartitions = nullptr;
         }
         if (deviceStates != nullptr) {
-            hipFree(deviceStates);
+            (void) hipFree(deviceStates);
             deviceStates = nullptr;
         }
     }

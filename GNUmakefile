@@ -21,4 +21,4 @@ caster-site-accelerator-reference: dir
 	g++ -std=gnu++17 -O2 -fno-fast-math -ffp-contract=off -pthread src/caster-site-accelerator-bench.cpp -o bin/caster-site-accelerator-reference
 
 caster-site-accelerator-hip: dir
-	$(HIPCC) -std=c++17 -O2 -fno-fast-math -ffp-contract=off -pthread --offload-arch=$(HIP_ARCH) src/caster-site-accelerator-bench.cpp -o bin/caster-site-accelerator-hip
+	$(HIPCC) -std=gnu++17 -O2 -fno-fast-math -ffp-contract=off -pthread --offload-arch=$(HIP_ARCH) src/caster-site-accelerator-bench.cpp -o bin/caster-site-accelerator-hip
