@@ -80,8 +80,9 @@ validation download. Cold performance includes them.
 ## Phase boundary
 
 Phase 1 is complete when replay passes on CPU and an AMD MI210 using real
-CASTER-site partitions, and the same source is compile-checked for a supported
-NVIDIA target when hardware is available.
+CASTER-site partitions. The same source must also be compile-checked for a
+supported NVIDIA target when both compatible hardware and a HIP-on-NVIDIA
+compiler toolchain are available.
 
 Topology decisions, full-tree CPU/GPU RF comparison, quadrupartitions,
 concurrent multi-GPU scheduling, and device-failure recovery remain later
