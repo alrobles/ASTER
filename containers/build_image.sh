@@ -21,9 +21,7 @@ command -v apptainer >/dev/null 2>&1 || {
     exit 1
 }
 
-export APPTAINER_CACHEDIR="${
-    APPTAINER_CACHEDIR:-${TMPDIR:-/tmp}/apptainer-cache-$(id -u)
-}"
+export APPTAINER_CACHEDIR="${APPTAINER_CACHEDIR:-${TMPDIR:-/tmp}/apptainer-cache-$(id -u)}"
 mkdir -p "$APPTAINER_CACHEDIR"
 
 echo "recipe=$DEF"
