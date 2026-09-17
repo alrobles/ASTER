@@ -406,10 +406,15 @@ struct HipResult {
     Result result;
     double setupMilliseconds;
     double allocationMilliseconds;
+    double staticUploadMilliseconds;
+    double tapeUploadMilliseconds;
     double uploadMilliseconds;
     double kernelMilliseconds;
+    double scoreDownloadMilliseconds;
+    double validationDownloadMilliseconds;
     double downloadMilliseconds;
     double reductionMilliseconds;
+    double residentBatchMilliseconds;
     double totalMilliseconds;
     double benchmarkWallMilliseconds;
     std::string deviceName;
@@ -457,14 +462,10 @@ HipResult runHip(const Dataset& dataset) {
         checkHip(hipMalloc(&devicePartials, partialBytes), "hipMalloc partial scores");
         const auto allocationStop = std::chrono::steady_clock::now();
 
-        const auto uploadStart = std::chrono::steady_clock::now();
+        const auto staticUploadStart = std::chrono::steady_clock::now();
         checkHip(
             hipMemcpy(deviceStates, dataset.states.data(), statesBytes, hipMemcpyHostToDevice),
             "hipMemcpy states"
-        );
-        checkHip(
-            hipMemcpy(deviceTape, dataset.tape.data(), tapeBytes, hipMemcpyHostToDevice),
-            "hipMemcpy tape"
         );
         checkHip(
             hipMemcpy(
@@ -484,7 +485,13 @@ HipResult runHip(const Dataset& dataset) {
             ),
             "hipMemcpy initial counts"
         );
-        const auto uploadStop = std::chrono::steady_clock::now();
+        const auto staticUploadStop = std::chrono::steady_clock::now();
+        const auto tapeUploadStart = std::chrono::steady_clock::now();
+        checkHip(
+            hipMemcpy(deviceTape, dataset.tape.data(), tapeBytes, hipMemcpyHostToDevice),
+            "hipMemcpy tape"
+        );
+        const auto tapeUploadStop = std::chrono::steady_clock::now();
 
         const dim3 blocks(static_cast<uint32_t>(blockCount));
         const dim3 threads(dataset.config.blockSize);
@@ -543,18 +550,19 @@ HipResult runHip(const Dataset& dataset) {
         checkHip(hipEventDestroy(kernelStart), "hipEventDestroy start");
         checkHip(hipEventDestroy(kernelStop), "hipEventDestroy stop");
 
-        const auto downloadStart = std::chrono::steady_clock::now();
         std::vector<uint16_t> counts(sites * 12);
         std::vector<double> partials(dataset.scoreCount * blockCount);
-        checkHip(
-            hipMemcpy(counts.data(), deviceCounts, countsBytes, hipMemcpyDeviceToHost),
-            "hipMemcpy counts"
-        );
+        const auto scoreDownloadStart = std::chrono::steady_clock::now();
         checkHip(
             hipMemcpy(partials.data(), devicePartials, partialBytes, hipMemcpyDeviceToHost),
             "hipMemcpy partial scores"
         );
-        const auto downloadStop = std::chrono::steady_clock::now();
+        const auto scoreDownloadStop = std::chrono::steady_clock::now();
+        checkHip(
+            hipMemcpy(counts.data(), deviceCounts, countsBytes, hipMemcpyDeviceToHost),
+            "hipMemcpy counts"
+        );
+        const auto validationDownloadStop = std::chrono::steady_clock::now();
 
         const auto reductionStart = std::chrono::steady_clock::now();
         std::vector<double> scores(dataset.scoreCount, 0.0);
@@ -572,16 +580,35 @@ HipResult runHip(const Dataset& dataset) {
             std::chrono::duration<double, std::milli>(
                 allocationStop - allocationStart
             ).count();
-        const double uploadMilliseconds =
-            std::chrono::duration<double, std::milli>(uploadStop - uploadStart).count();
-        const double downloadMilliseconds =
+        const double staticUploadMilliseconds =
             std::chrono::duration<double, std::milli>(
-                downloadStop - downloadStart
+                staticUploadStop - staticUploadStart
             ).count();
+        const double tapeUploadMilliseconds =
+            std::chrono::duration<double, std::milli>(
+                tapeUploadStop - tapeUploadStart
+            ).count();
+        const double uploadMilliseconds =
+            staticUploadMilliseconds + tapeUploadMilliseconds;
+        const double scoreDownloadMilliseconds =
+            std::chrono::duration<double, std::milli>(
+                scoreDownloadStop - scoreDownloadStart
+            ).count();
+        const double validationDownloadMilliseconds =
+            std::chrono::duration<double, std::milli>(
+                validationDownloadStop - scoreDownloadStop
+            ).count();
+        const double downloadMilliseconds =
+            scoreDownloadMilliseconds + validationDownloadMilliseconds;
         const double reductionMilliseconds =
             std::chrono::duration<double, std::milli>(
                 reductionStop - reductionStart
             ).count();
+        const double residentBatchMilliseconds =
+            tapeUploadMilliseconds
+                + kernelMilliseconds
+                + scoreDownloadMilliseconds
+                + reductionMilliseconds;
 
         HipResult output{
             {
@@ -591,10 +618,15 @@ HipResult runHip(const Dataset& dataset) {
             },
             setupMilliseconds,
             allocationMilliseconds,
+            staticUploadMilliseconds,
+            tapeUploadMilliseconds,
             uploadMilliseconds,
             kernelMilliseconds,
+            scoreDownloadMilliseconds,
+            validationDownloadMilliseconds,
             downloadMilliseconds,
             reductionMilliseconds,
+            residentBatchMilliseconds,
             setupMilliseconds
                 + allocationMilliseconds
                 + uploadMilliseconds
@@ -755,13 +787,21 @@ int main(int argc, char** argv) {
         std::cout << "device=" << gpu.deviceName << '\n'
                   << "setup_ms=" << gpu.setupMilliseconds << '\n'
                   << "allocation_ms=" << gpu.allocationMilliseconds << '\n'
+                  << "static_upload_ms=" << gpu.staticUploadMilliseconds << '\n'
+                  << "tape_upload_ms=" << gpu.tapeUploadMilliseconds << '\n'
                   << "upload_ms=" << gpu.uploadMilliseconds << '\n'
                   << "kernel_ms=" << gpu.kernelMilliseconds << '\n'
+                  << "score_download_ms=" << gpu.scoreDownloadMilliseconds << '\n'
+                  << "validation_download_ms="
+                  << gpu.validationDownloadMilliseconds << '\n'
                   << "download_ms=" << gpu.downloadMilliseconds << '\n'
                   << "host_reduction_ms=" << gpu.reductionMilliseconds << '\n'
+                  << "resident_batch_ms=" << gpu.residentBatchMilliseconds << '\n'
                   << "gpu_total_ms=" << gpu.totalMilliseconds << '\n'
                   << "benchmark_wall_ms=" << gpu.benchmarkWallMilliseconds << '\n'
                   << "resident_speedup=" << cpu.milliseconds / gpu.kernelMilliseconds << '\n'
+                  << "resident_end_to_end_speedup="
+                  << cpu.milliseconds / gpu.residentBatchMilliseconds << '\n'
                   << "end_to_end_speedup=" << cpu.milliseconds / gpu.totalMilliseconds << '\n'
                   << "validation=passed\n";
 #else

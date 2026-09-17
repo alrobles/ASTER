@@ -125,12 +125,22 @@ Acceptance criteria:
 3. every score satisfies an explicit absolute-plus-relative tolerance;
 4. repeated strict runs return the same counters and scores;
 5. invalid tape entries fail before launch;
-6. setup, host-to-device, kernel, device-to-host, and total times are reported;
+6. setup, static upload, tape upload, kernel, score download, validation
+   download, host reduction, resident-batch, and cold total times are reported;
 7. the benchmark exits non-zero on any mismatch or HIP error.
 
-`gpu_total_ms` is the sum of setup, allocation, upload, one average resident
-kernel execution, download, and ordered host reduction. `benchmark_wall_ms`
-also includes the warmup and all repeated timing iterations.
+`resident_batch_ms` measures the production-shaped path after sequences,
+frequencies, and counters are resident:
+
+```text
+tape upload + average kernel + score-partial download + ordered host reduction
+```
+
+Final-counter download is validation-only because an integrated executor keeps
+and swaps counter buffers on the device. `gpu_total_ms` is the cold sum of
+setup, allocation, all uploads, one average kernel execution, all validation
+downloads, and ordered host reduction. `benchmark_wall_ms` also includes the
+warmup and all repeated timing iterations.
 
 Full-search integration additionally requires RF zero between CPU and GPU
 trees on the same taxa, seed, input, chunking, and operation order.
@@ -141,7 +151,8 @@ Continue from Phase 0 to the CASTER executor only if:
 
 - the MI210 kernel is correct;
 - batched execution is faster than the portable CPU reference;
-- projected end-to-end speedup is at least 2× after measured transfers;
+- resident end-to-end speedup is at least 2× after measured per-batch
+  transfers;
 - resident state fits with headroom on a 64 GB MI210.
 
 Quadrupartition support follows tripartition validation. Multi-GPU scheduling
