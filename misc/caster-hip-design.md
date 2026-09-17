@@ -74,7 +74,10 @@ struct Operation {
     int8_t from;
     int8_t to;
     OperationKind kind;
+    uint8_t reserved;
 };
+
+static_assert(sizeof(Operation) == 8);
 ```
 
 `from == -1` adds a previously unassigned taxon. `to == -1` removes a taxon.
