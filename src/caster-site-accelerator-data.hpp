@@ -11,7 +11,7 @@
 #include <stdexcept>
 #include <vector>
 
-#ifdef __HIPCC__
+#if defined(__HIPCC__) || defined(__CUDACC__)
 #define CASTER_ACCELERATOR_HD __host__ __device__
 #else
 #define CASTER_ACCELERATOR_HD

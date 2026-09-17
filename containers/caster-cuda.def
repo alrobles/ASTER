@@ -1,0 +1,52 @@
+Bootstrap: docker
+From: nvidia/cuda:12.4.1-devel-ubuntu22.04
+
+%labels
+    org.aster.role accelerator_cuda
+    org.aster.cuda 12.4.1
+    org.aster.hip_headers 6.4.3
+    org.aster.gpu_required false
+    org.aster.runtime "apptainer exec --nv <sif>"
+
+%environment
+    export CUDA_HOME=/usr/local/cuda
+    export HIP_PATH=/opt/hip
+    export PATH=/usr/local/cuda/bin:$PATH
+    export CPATH=/opt/hip/include:${CPATH:-}
+    export LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}
+    export LC_ALL=C
+
+%post
+    set -e
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        ca-certificates g++ git make python3
+    rm -rf /var/lib/apt/lists/*
+
+    git clone --branch rocm-6.4.3 --depth 1 \
+        https://github.com/ROCm/HIP.git /opt/hip
+
+    mkdir -p /opt/aster
+    nvcc --version | tail -2 > /opt/aster/toolchain.txt
+    printf "hip_headers_commit=" >> /opt/aster/toolchain.txt
+    git -C /opt/hip rev-parse HEAD >> /opt/aster/toolchain.txt
+    echo "base=nvidia/cuda:12.4.1-devel-ubuntu22.04" \
+        >> /opt/aster/toolchain.txt
+
+%runscript
+    if [ $# -eq 0 ]; then
+        cat /opt/aster/toolchain.txt
+    else
+        exec "$@"
+    fi
+
+%test
+    set -e
+    cat > /tmp/probe.cu <<'EOF'
+#include <hip/hip_runtime.h>
+__global__ void probe(int* output) { output[0] = 1; }
+int main() { return 0; }
+EOF
+    nvcc -std=c++17 -D__HIP_PLATFORM_NVIDIA__ -I/opt/hip/include \
+        -arch=sm_80 -o /tmp/probe /tmp/probe.cu
+    echo "CASTER_CUDA_IMAGE_TEST: PASS"
