@@ -11,12 +11,17 @@ set -euo pipefail
 
 ROOT="${SLURM_SUBMIT_DIR}"
 SIF="${CASTER_SIF:-/beegfs/a474r867/ASTER/images/caster-rocm.sif}"
+CPU_DIR="${TMPDIR:-/tmp}/caster-validation-${SLURM_JOB_ID}"
+CPU_BIN="${CPU_DIR}/caster-site-accelerator-reference"
+mkdir -p "$CPU_DIR"
+trap 'rm -f "$CPU_BIN"; rmdir "$CPU_DIR" 2>/dev/null || true' EXIT
 
-apptainer exec --bind /beegfs:/beegfs "$SIF" \
-    make -C "$ROOT" -f GNUmakefile caster-site-accelerator-reference
+apptainer exec --bind /beegfs:/beegfs --bind "$CPU_DIR:$CPU_DIR" "$SIF" \
+    make -C "$ROOT" -f GNUmakefile caster-site-accelerator-reference \
+    ACCELERATOR_REFERENCE_BIN="$CPU_BIN"
 
-apptainer exec --bind /beegfs:/beegfs "$SIF" \
-    "$ROOT/bin/caster-site-accelerator-reference" \
+apptainer exec --bind /beegfs:/beegfs --bind "$CPU_DIR:$CPU_DIR" "$SIF" \
+    "$CPU_BIN" \
     -t 4 --seed 233 --accelerator-moves 240 \
     --accelerator-batch-moves 80 --accelerator-score-every 8 \
     "$ROOT/example/example.phylip"
