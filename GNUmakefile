@@ -27,4 +27,4 @@ caster-site-accelerator-hip: dir
 	$(HIPCC) -std=gnu++17 -O2 -fno-fast-math -ffp-contract=off -pthread --offload-arch=$(HIP_ARCH) src/caster-site-accelerator-bench.cpp -o bin/caster-site-accelerator-hip
 
 caster-site-accelerator-cuda: dir
-	$(NVCC) -std=c++17 -O2 --fmad=false -D__HIP_PLATFORM_NVIDIA__ -I$(HIP_NVIDIA_INCLUDE) -arch=$(CUDA_ARCH) -x cu -Xcompiler=-pthread,-fno-fast-math,-ffp-contract=off src/caster-site-accelerator-bench.cpp -o bin/caster-site-accelerator-cuda
+	$(NVCC) -std=c++17 -O2 --fmad=false -D__HIP_PLATFORM_NVIDIA__ -D__GLIBCXX_TYPE_INT_N_0=__int128 -D__GLIBCXX_BITSIZE_INT_N_0=128 -I$(HIP_NVIDIA_INCLUDE) -arch=$(CUDA_ARCH) -x cu -Xcompiler=-pthread,-fno-fast-math,-ffp-contract=off src/caster-site-accelerator-bench.cpp -o bin/caster-site-accelerator-cuda
