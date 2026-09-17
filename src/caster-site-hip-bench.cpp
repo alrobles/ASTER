@@ -49,6 +49,8 @@ struct Config {
 struct Dataset {
     Config config;
     std::vector<uint8_t> states;
+    std::vector<int8_t> initialColors;
+    std::vector<uint16_t> initialCounts;
     std::vector<Operation> tape;
     std::array<float, 4> frequencies;
     size_t scoreCount;
@@ -158,15 +160,26 @@ Dataset generateDataset(const Config& config) {
 
     std::uniform_int_distribution<uint32_t> taxonDistribution(0, config.taxa - 1);
     std::uniform_int_distribution<int> groupDistribution(0, 2);
-    std::vector<int8_t> colors(config.taxa, -1);
+    dataset.initialColors.resize(config.taxa);
+    dataset.initialCounts.resize(config.sites * 12, 0);
 
     for (uint32_t taxon = 0; taxon < config.taxa; ++taxon) {
-        const int8_t to = static_cast<int8_t>(groupDistribution(random));
-        dataset.tape.push_back({taxon, -1, to, OperationKind::Update, 0});
-        colors[taxon] = to;
+        const int8_t group = static_cast<int8_t>(groupDistribution(random));
+        dataset.initialColors[taxon] = group;
+        for (size_t site = 0; site < config.sites; ++site) {
+            const uint8_t base = dataset.states[
+                static_cast<size_t>(taxon) * config.sites + site
+            ];
+            if (base <= 3) {
+                ++dataset.initialCounts[
+                    site * 12 + static_cast<size_t>(group) * 4 + base
+                ];
+            }
+        }
     }
     dataset.tape.push_back({0, -1, -1, OperationKind::ScoreTripartition, 0});
 
+    std::vector<int8_t> colors = dataset.initialColors;
     for (size_t move = 0; move < config.moves; ++move) {
         const uint32_t taxon = taxonDistribution(random);
         const int8_t from = colors[taxon];
@@ -194,7 +207,7 @@ Dataset generateDataset(const Config& config) {
 }
 
 void validateTape(const Dataset& dataset) {
-    std::vector<int8_t> colors(dataset.config.taxa, -1);
+    std::vector<int8_t> colors = dataset.initialColors;
     for (const Operation& operation : dataset.tape) {
         if (operation.kind == OperationKind::ScoreTripartition) {
             continue;
@@ -249,7 +262,12 @@ Result runCpu(const Dataset& dataset) {
     std::vector<double> siteScores(dataset.scoreCount * sites, 0.0);
 
     for (size_t site = 0; site < sites; ++site) {
-        uint16_t localCounts[12] = {};
+        uint16_t localCounts[12];
+        std::copy(
+            dataset.initialCounts.begin() + site * 12,
+            dataset.initialCounts.begin() + (site + 1) * 12,
+            localCounts
+        );
         size_t scoreIndex = 0;
         for (const Operation& operation : dataset.tape) {
             if (operation.kind == OperationKind::Update) {
@@ -327,6 +345,7 @@ __global__ void executeTape(
     size_t operationCount,
     const float* frequencies,
     size_t scoreCount,
+    const uint16_t* initialCounts,
     uint16_t* finalCounts,
     double* partialScores
 ) {
@@ -335,6 +354,11 @@ __global__ void executeTape(
     const size_t site = static_cast<size_t>(blockIdx.x) * blockDim.x + lane;
     const bool active = site < sites;
     uint16_t counts[12] = {};
+    if (active) {
+        for (size_t index = 0; index < 12; ++index) {
+            counts[index] = initialCounts[site * 12 + index];
+        }
+    }
     size_t scoreIndex = 0;
 
     for (size_t operationIndex = 0; operationIndex < operationCount; ++operationIndex) {
@@ -408,6 +432,7 @@ HipResult runHip(const Dataset& dataset) {
     uint8_t* deviceStates = nullptr;
     Operation* deviceTape = nullptr;
     float* deviceFrequencies = nullptr;
+    uint16_t* deviceInitialCounts = nullptr;
     uint16_t* deviceCounts = nullptr;
     double* devicePartials = nullptr;
 
@@ -416,6 +441,7 @@ HipResult runHip(const Dataset& dataset) {
         hipFree(deviceStates);
         hipFree(deviceTape);
         hipFree(deviceFrequencies);
+        hipFree(deviceInitialCounts);
         hipFree(deviceCounts);
         hipFree(devicePartials);
     };
@@ -423,6 +449,10 @@ HipResult runHip(const Dataset& dataset) {
         checkHip(hipMalloc(&deviceStates, statesBytes), "hipMalloc states");
         checkHip(hipMalloc(&deviceTape, tapeBytes), "hipMalloc tape");
         checkHip(hipMalloc(&deviceFrequencies, frequenciesBytes), "hipMalloc frequencies");
+        checkHip(
+            hipMalloc(&deviceInitialCounts, countsBytes),
+            "hipMalloc initial counts"
+        );
         checkHip(hipMalloc(&deviceCounts, countsBytes), "hipMalloc counts");
         checkHip(hipMalloc(&devicePartials, partialBytes), "hipMalloc partial scores");
         const auto allocationStop = std::chrono::steady_clock::now();
@@ -445,6 +475,15 @@ HipResult runHip(const Dataset& dataset) {
             ),
             "hipMemcpy frequencies"
         );
+        checkHip(
+            hipMemcpy(
+                deviceInitialCounts,
+                dataset.initialCounts.data(),
+                countsBytes,
+                hipMemcpyHostToDevice
+            ),
+            "hipMemcpy initial counts"
+        );
         const auto uploadStop = std::chrono::steady_clock::now();
 
         const dim3 blocks(static_cast<uint32_t>(blockCount));
@@ -463,6 +502,7 @@ HipResult runHip(const Dataset& dataset) {
             dataset.tape.size(),
             deviceFrequencies,
             dataset.scoreCount,
+            deviceInitialCounts,
             deviceCounts,
             devicePartials
         );
@@ -487,6 +527,7 @@ HipResult runHip(const Dataset& dataset) {
                 dataset.tape.size(),
                 deviceFrequencies,
                 dataset.scoreCount,
+                deviceInitialCounts,
                 deviceCounts,
                 devicePartials
             );
