@@ -100,7 +100,8 @@ partial_scores[score_operation][workgroup]
 ```
 
 The host sums workgroups in ascending index order. Phase 0 does not use an
-atomic global sum.
+atomic global sum. The partial-score staging buffer is pinned host memory so
+the measured resident transfer does not include pageable-memory staging.
 
 ## Invariants
 

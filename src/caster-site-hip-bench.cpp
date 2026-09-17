@@ -417,6 +417,8 @@ struct HipResult {
     double residentBatchMilliseconds;
     double totalMilliseconds;
     double benchmarkWallMilliseconds;
+    size_t deviceAllocationBytes;
+    size_t deviceGlobalMemoryBytes;
     std::string deviceName;
 };
 
@@ -429,6 +431,12 @@ HipResult runHip(const Dataset& dataset) {
     const size_t frequenciesBytes = dataset.frequencies.size() * sizeof(float);
     const size_t countsBytes = sites * 12 * sizeof(uint16_t);
     const size_t partialBytes = dataset.scoreCount * blockCount * sizeof(double);
+    const size_t deviceAllocationBytes =
+        statesBytes
+            + tapeBytes
+            + frequenciesBytes
+            + 2 * countsBytes
+            + partialBytes;
 
     hipDeviceProp_t properties;
     checkHip(hipGetDeviceProperties(&properties, 0), "hipGetDeviceProperties");
@@ -440,6 +448,7 @@ HipResult runHip(const Dataset& dataset) {
     uint16_t* deviceInitialCounts = nullptr;
     uint16_t* deviceCounts = nullptr;
     double* devicePartials = nullptr;
+    double* hostPartials = nullptr;
 
     const auto allocationStart = std::chrono::steady_clock::now();
     const auto cleanup = [&]() {
@@ -449,6 +458,7 @@ HipResult runHip(const Dataset& dataset) {
         hipFree(deviceInitialCounts);
         hipFree(deviceCounts);
         hipFree(devicePartials);
+        hipHostFree(hostPartials);
     };
     try {
         checkHip(hipMalloc(&deviceStates, statesBytes), "hipMalloc states");
@@ -460,6 +470,7 @@ HipResult runHip(const Dataset& dataset) {
         );
         checkHip(hipMalloc(&deviceCounts, countsBytes), "hipMalloc counts");
         checkHip(hipMalloc(&devicePartials, partialBytes), "hipMalloc partial scores");
+        checkHip(hipHostMalloc(&hostPartials, partialBytes), "hipHostMalloc partial scores");
         const auto allocationStop = std::chrono::steady_clock::now();
 
         const auto staticUploadStart = std::chrono::steady_clock::now();
@@ -551,10 +562,9 @@ HipResult runHip(const Dataset& dataset) {
         checkHip(hipEventDestroy(kernelStop), "hipEventDestroy stop");
 
         std::vector<uint16_t> counts(sites * 12);
-        std::vector<double> partials(dataset.scoreCount * blockCount);
         const auto scoreDownloadStart = std::chrono::steady_clock::now();
         checkHip(
-            hipMemcpy(partials.data(), devicePartials, partialBytes, hipMemcpyDeviceToHost),
+            hipMemcpy(hostPartials, devicePartials, partialBytes, hipMemcpyDeviceToHost),
             "hipMemcpy partial scores"
         );
         const auto scoreDownloadStop = std::chrono::steady_clock::now();
@@ -568,7 +578,7 @@ HipResult runHip(const Dataset& dataset) {
         std::vector<double> scores(dataset.scoreCount, 0.0);
         for (size_t score = 0; score < dataset.scoreCount; ++score) {
             for (size_t block = 0; block < blockCount; ++block) {
-                scores[score] += partials[score * blockCount + block];
+                scores[score] += hostPartials[score * blockCount + block];
             }
         }
         const auto reductionStop = std::chrono::steady_clock::now();
@@ -636,6 +646,8 @@ HipResult runHip(const Dataset& dataset) {
             std::chrono::duration<double, std::milli>(
                 reductionStop - totalStart
             ).count(),
+            deviceAllocationBytes,
+            properties.totalGlobalMem,
             properties.name
         };
 
@@ -785,6 +797,12 @@ int main(int argc, char** argv) {
         const caster_hip::HipResult gpu = caster_hip::runHip(dataset);
         caster_hip::validateHipResult(cpu, gpu.result);
         std::cout << "device=" << gpu.deviceName << '\n'
+                  << "device_allocation_bytes=" << gpu.deviceAllocationBytes << '\n'
+                  << "device_global_memory_bytes=" << gpu.deviceGlobalMemoryBytes << '\n'
+                  << "device_memory_fraction="
+                  << static_cast<double>(gpu.deviceAllocationBytes)
+                        / static_cast<double>(gpu.deviceGlobalMemoryBytes)
+                  << '\n'
                   << "setup_ms=" << gpu.setupMilliseconds << '\n'
                   << "allocation_ms=" << gpu.allocationMilliseconds << '\n'
                   << "static_upload_ms=" << gpu.staticUploadMilliseconds << '\n'
