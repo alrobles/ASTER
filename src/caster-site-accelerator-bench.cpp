@@ -11,7 +11,7 @@
 #include "caster-site-workflow.hpp"
 #include "caster-site-accelerator-data.hpp"
 
-#ifdef __HIPCC__
+#if defined(__HIPCC__) || defined(__CUDACC__)
 #include "caster-site-accelerator-hip.hpp"
 #endif
 

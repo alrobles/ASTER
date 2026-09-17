@@ -1,8 +1,8 @@
 #ifndef CASTER_SITE_ACCELERATOR_HIP_HPP
 #define CASTER_SITE_ACCELERATOR_HIP_HPP
 
-#ifndef __HIPCC__
-#error "caster-site-accelerator-hip.hpp requires a HIP compiler"
+#if !defined(__HIPCC__) && !defined(__CUDACC__)
+#error "caster-site-accelerator-hip.hpp requires a HIP or CUDA compiler"
 #endif
 
 #include <algorithm>

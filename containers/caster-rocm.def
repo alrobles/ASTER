@@ -1,0 +1,45 @@
+Bootstrap: docker
+From: rocm/dev-ubuntu-24.04:6.4.3-complete
+
+%labels
+    org.aster.role accelerator_rocm
+    org.aster.rocm 6.4.3
+    org.aster.gpu_required false
+    org.aster.runtime "apptainer exec --rocm <sif>"
+
+%environment
+    export ROCM_PATH=/opt/rocm
+    export PATH=/opt/rocm/bin:$PATH
+    export LD_LIBRARY_PATH=/opt/rocm/lib:${LD_LIBRARY_PATH:-}
+    export LC_ALL=C
+    export HIPCC_COMPILE_FLAGS_APPEND=""
+
+%post
+    set -e
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        ca-certificates g++ git make python3
+    rm -rf /var/lib/apt/lists/*
+
+    mkdir -p /opt/aster
+    hipcc --version 2>&1 | head -2 > /opt/aster/toolchain.txt
+    gcc --version | head -1 >> /opt/aster/toolchain.txt
+    echo "base=rocm/dev-ubuntu-24.04:6.4.3-complete" \
+        >> /opt/aster/toolchain.txt
+
+%runscript
+    if [ $# -eq 0 ]; then
+        cat /opt/aster/toolchain.txt
+    else
+        exec "$@"
+    fi
+
+%test
+    set -e
+    cat > /tmp/probe.hip <<'EOF'
+#include <hip/hip_runtime.h>
+__global__ void probe(int* output) { output[0] = 1; }
+int main() { return 0; }
+EOF
+    hipcc --offload-arch=gfx90a -o /tmp/probe /tmp/probe.hip
+    echo "CASTER_ROCM_IMAGE_TEST: PASS"
