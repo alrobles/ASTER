@@ -29,13 +29,19 @@ batched NNI, beam search, and multi-node scheduling remain later phases.
 One shared dataset contains:
 
 - encoded observations;
-- partition frequencies and offsets;
+- statistical partition frequencies, weights, and offsets;
 - species-to-individual ranges;
 - site-to-partition mappings;
 - taxon hashes and names used by topology code.
 
 Parsing, informative-site filtering, individual mappings, missing-data
 semantics, and partition weights remain unchanged.
+
+Statistical partitions are not execution units. CPU workers and GPU blocks may
+shard sites from one statistical partition while every site continues to use
+that partition's original frequencies and weight. Accelerator scheduling must
+not change `--chunk`, recompute frequencies, or split an input alignment into
+new biological partitions.
 
 ### Private search state
 
@@ -163,6 +169,8 @@ threads, device model, backend, seed, commit, and final tree hash.
 ### Increment 1: private CPU state
 
 - production and flattened CPU operation traces are identical;
+- one statistical partition can be divided across multiple execution shards
+  without changing its score;
 - counters are byte-identical after every checked flush;
 - score vectors pass explicit absolute and relative tolerances;
 - final topology has RF 0 against production CPU;
