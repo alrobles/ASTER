@@ -87,6 +87,13 @@ positions and return zero; score results preserve their original positions.
 This queue is the correctness boundary shared by the resident CPU and HIP
 executors.
 
+Each accelerated score also carries a conservative numerical error bound.
+Topology code accepts a device result only when the candidate score intervals
+cannot change the legacy comparison after `ERROR_TOLERANCE` is applied.
+Overlapping intervals trigger production-CPU recomputation before the
+decision. The bound and fallback count are recorded; an empirical tolerance
+alone is not proof that a topology decision is safe.
+
 ### Executor factory
 
 An executor factory creates one private mutable state per
@@ -162,7 +169,8 @@ Report separately:
 - peak host and device memory.
 
 Every report includes raw columns, informative sites, taxa, partitions,
-threads, device model, backend, seed, commit, and final tree hash.
+threads, device model, backend, seed, commit, final tree hash, numerical
+fallback count, and maximum reported score error bound.
 
 ## Acceptance criteria
 
@@ -173,6 +181,7 @@ threads, device model, backend, seed, commit, and final tree hash.
   without changing its score;
 - counters are byte-identical after every checked flush;
 - score vectors pass explicit absolute and relative tolerances;
+- constructed near-ties exercise production-CPU decision fallback;
 - final topology has RF 0 against production CPU;
 - two concurrent guide searches pass thread and address sanitizers;
 - repeated runs produce identical tree and trace hashes.
