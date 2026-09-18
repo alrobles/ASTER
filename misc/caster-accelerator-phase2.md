@@ -50,6 +50,21 @@ Every active guide or placement search owns:
 No mutable counter or color may remain in the shared initializer on the
 accelerated path.
 
+### Deterministic search plan
+
+Before workers start, the legacy pseudorandom generator produces a
+single-threaded `SearchPlan` containing every decision that would otherwise
+consume global random state:
+
+- initial taxon hashes;
+- guide taxon subsets and insertion orders;
+- subsampling subsets and insertion orders;
+- stable search and merge indices.
+
+Workers consume this immutable plan and never call the global random generator.
+Plan serialization includes a version, seed, input hash, and plan hash so CPU,
+AMD, and NVIDIA runs can prove that they executed the same search.
+
 ### Ordered operation queue
 
 The topology code emits:
@@ -86,7 +101,7 @@ types.
 
 For a fixed input, seed, commit, arguments, and hardware profile:
 
-1. precompute guide insertion orders before concurrent execution;
+1. generate and hash the complete search plan before concurrent execution;
 2. assign every guide a stable index;
 3. keep every guide's mutable state private;
 4. store results by guide index, independent of completion order;
