@@ -24,6 +24,7 @@ apptainer exec --bind /beegfs:/beegfs --bind "$CPU_DIR:$CPU_DIR" "$SIF" \
     "$CPU_BIN" \
     -t 4 --seed 233 --accelerator-moves 240 \
     --accelerator-batch-moves 80 --accelerator-score-every 8 \
+    --accelerator-production-tape \
     "$ROOT/example/example.phylip"
 
 apptainer exec --nv --bind /beegfs:/beegfs "$SIF" \
@@ -34,4 +35,5 @@ apptainer exec --nv --bind /beegfs:/beegfs "$SIF" \
     "$ROOT/bin/caster-site-accelerator-cuda" \
     -t 4 --seed 233 --accelerator-moves 240 \
     --accelerator-batch-moves 80 --accelerator-score-every 8 \
+    --accelerator-production-tape \
     "$ROOT/example/example.phylip"

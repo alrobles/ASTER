@@ -211,6 +211,8 @@ struct TripartitionInitializer{
 	};
 	
 	struct Gene{
+		struct PrivateSearchState {};
+
 		struct Initializer {
 			array<float, 4> pi;
 			vector<vector<int> > species2ind;
@@ -290,6 +292,12 @@ struct TripartitionInitializer{
 				pi(init.pi), species2indRange(init.species2indRange()), indBin(init.indBin()), weight(init.weight),
 				indSiteRep2kernal(init.indSiteRep2kernal), ind2seq(init.ind2seq), kernal(new Kernal[init.nKernal]) {}
 
+		Gene(const Gene& init, PrivateSearchState): nInd(init.nInd), nSpecies(init.nSpecies), nSite(init.nSite), nKernal(init.nKernal), nRep(init.nRep),
+				pi(init.pi), species2indRange(init.species2indRange), indBin(init.indBin), weight(init.weight),
+				indSiteRep2kernal(init.indSiteRep2kernal), ind2seq(init.ind2seq), kernal(new Kernal[init.nKernal]) {
+			clearCntScore();
+		}
+
 		void updateCnt(int i, int y, int x, const Sequence &seq) {
 			if (i >= nSpecies) return;
 			int indStart = (i == 0) ? 0 : species2indRange[i - 1];
@@ -340,29 +348,35 @@ struct TripartitionInitializer{
 };
 
 struct Tripartition{
-	TripartitionInitializer& TI;
+	const TripartitionInitializer& TI;
+	vector<TripartitionInitializer::Gene> genes;
 	vector<vector<char> > color;
 
-	Tripartition(TripartitionInitializer &init): TI(init), color(init.nThreads, vector<char>(init.nSpecies, -1)){
-		for (TripartitionInitializer::Gene &g: TI.genes){
-			g.clearCntScore();
+	Tripartition(const TripartitionInitializer &init): TI(init), color(init.nThreads, vector<char>(init.nSpecies, -1)){
+		genes.reserve(init.genes.size());
+		for (const TripartitionInitializer::Gene &g: init.genes){
+			genes.emplace_back(g, TripartitionInitializer::Gene::PrivateSearchState{});
 		}
 	}
+	Tripartition(const Tripartition&) = delete;
+	Tripartition& operator=(const Tripartition&) = delete;
+	Tripartition(Tripartition&&) = default;
+	Tripartition& operator=(Tripartition&&) = delete;
 
 	void updatePart(int part, int x, int i){
-		int start = TI.genes.size() * part / TI.nThreads, end = TI.genes.size() * (1 + part) / TI.nThreads;
+		int start = genes.size() * part / TI.nThreads, end = genes.size() * (1 + part) / TI.nThreads;
 		int y = color[part][i];
 		color[part][i] = x;
 		for (int a = start; a < end; a++){
-			TI.genes[a].updateCnt(i, y, x, TI.seq);
+			genes[a].updateCnt(i, y, x, TI.seq);
 		}
 	}
 	
 	score_t scorePart(int part){
-		int start = TI.genes.size() * part / TI.nThreads, end = TI.genes.size() * (1 + part) / TI.nThreads;
+		int start = genes.size() * part / TI.nThreads, end = genes.size() * (1 + part) / TI.nThreads;
 		score_t result = 0;
 		for (int a = start; a < end; a++){
-			result += TI.genes[a].scoreCnt();
+			result += genes[a].scoreCnt();
 		}
 		return result;
 	}

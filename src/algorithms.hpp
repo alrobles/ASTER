@@ -27,6 +27,8 @@
 typedef unsigned __int128 hash_t;
 
 #include<iostream>
+#include<atomic>
+#include<future>
 #include<vector>
 #include<array>
 #include<utility> 
@@ -44,6 +46,7 @@ typedef unsigned __int128 hash_t;
 
 #include "incbeta.c"
 #include "argparser.hpp"
+#include "caster-site-operation-tape.hpp"
 #include "threadpool.hpp"
 #include "speciestree.hpp"
 
@@ -183,13 +186,16 @@ struct PlacementAlgorithm{
 	int rootNodeId = -1, rootLeafId = -1;
 	size_t orderId = 0;
 	int rNN;
+	bool logNniMoves = true;
 	
 	Tripartition trip;
 	const int ROUND_NN = -1;
 	ThreadPool &TP;
+	caster_accelerator::OperationRecorder *operationRecorder;
 	
-	PlacementAlgorithm(const vector<hash_t> &taxonHash, TripartitionInitializer &tripInit, ThreadPool& TP, int ROUND_NN):
-		taxonHash(taxonHash), rNN(ROUND_NN), trip(tripInit), ROUND_NN(ROUND_NN), TP(TP) {}
+	PlacementAlgorithm(const vector<hash_t> &taxonHash, TripartitionInitializer &tripInit, ThreadPool& TP, int ROUND_NN,
+			caster_accelerator::OperationRecorder *operationRecorder = nullptr):
+		taxonHash(taxonHash), rNN(ROUND_NN), trip(tripInit), ROUND_NN(ROUND_NN), TP(TP), operationRecorder(operationRecorder) {}
 	
 	int& heavy(int v){
 		return nodes[v].heavy;
@@ -285,6 +291,7 @@ struct PlacementAlgorithm{
 	}
 	
 	void tripUpdateSet(int tgt, int i){
+		if (operationRecorder != nullptr) operationRecorder->recordUpdate(i, tgt);
 		Tripartition &t = trip;
 		TP.push([=, &t](int part)->score_t{t.updatePart(part, tgt, i); return 0;});
 	}
@@ -294,12 +301,15 @@ struct PlacementAlgorithm{
 	}
 
 	void tripScoreSet(){
+		if (operationRecorder != nullptr) operationRecorder->recordScore();
 		Tripartition &t = trip;
 		TP.push([=, &t](int part)->score_t{return t.scorePart(part);});
 	}
 
 	score_t tripScoreGet(){
-		return TP.pop();
+		score_t result = TP.pop();
+		if (operationRecorder != nullptr) operationRecorder->recordScoreResult(result);
+		return result;
 	}
 
 	score_t tripScore(){
@@ -1111,7 +1121,9 @@ struct PlacementAlgorithm{
 			tripUpdateGet(0, rootLeafId);
 			switchSubtreeGet(rootNodeId, -1, 0);
 			nnMove2(rootNodeId);
-			LOG << "#NNI moves:" << ROUND_NN - rNN << "/" << ROUND_NN << endl;
+			if (logNniMoves) {
+				LOG << "#NNI moves:" << ROUND_NN - rNN << "/" << ROUND_NN << endl;
+			}
 		}
 	}
 	
@@ -1214,6 +1226,7 @@ struct ConstrainedOptimizationAlgorithm{
 	int roundId = 0;
 	ThreadPool &TP;
 	int ROUND_NN = -1;
+	int guideWorkers = 1;
 
 	shared_ptr<AnnotatedTree> annotTree;
 	double tempSibling, tempRoot;
@@ -1231,7 +1244,7 @@ struct ConstrainedOptimizationAlgorithm{
 	}
 	
 	ConstrainedOptimizationAlgorithm(const ConstrainedOptimizationAlgorithm &alg): 
-			ntaxa(alg.ntaxa), tripInit(alg.tripInit), names(alg.names), nodes(alg.nodes), hash(alg.hash), taxonHash(alg.taxonHash), TP(alg.TP), ROUND_NN(alg.ROUND_NN) {}
+			ntaxa(alg.ntaxa), tripInit(alg.tripInit), names(alg.names), nodes(alg.nodes), hash(alg.hash), taxonHash(alg.taxonHash), TP(alg.TP), ROUND_NN(alg.ROUND_NN), guideWorkers(alg.guideWorkers) {}
 	
 	int subsampleSubtree(int v, PlacementAlgorithm &pAlg, const unordered_set<int> &selected){
 		if (nodes[v].leafId != -1){
@@ -1560,7 +1573,65 @@ struct ConstrainedOptimizationAlgorithm{
 			order[0] = 0;
 			hash_t hashsum = 0;
 			for (int i = 1; i < n; i++) hashsum += taxonHash[order[i]];
-			
+
+#ifdef CASTER_CONCURRENT_GUIDES
+			alg.taxonHash[0] = -hashsum;
+
+			vector<vector<int> > guideOrders(n);
+			for (int r = 0; r < n; r++){
+				for (int i = 0; i < n; i++) {
+					guideOrders[r].push_back(order[i]);
+				}
+				shuffle(
+					guideOrders[r].begin(),
+					guideOrders[r].end(),
+					RND_GENERATOR
+				);
+			}
+
+			struct GuideResult {
+				vector<tuple<hash_t, hash_t, score_t> > tripHash;
+				int nniMoves = 0;
+			};
+			vector<GuideResult> guideResults(n);
+			atomic<int> nextGuide(0);
+			auto executeGuides = [&]() {
+				ThreadPool guidePool(TP.threadCount());
+				while (true) {
+					const int r = nextGuide.fetch_add(1);
+					if (r >= n) return;
+					PlacementAlgorithm guide(
+						taxonHash,
+						tripInit,
+						guidePool,
+						ROUND_NN
+					);
+					guide.taxonHash[0] = -hashsum;
+					guide.order = guideOrders[r];
+					guide.logNniMoves = false;
+					guide.run();
+					guideResults[r].tripHash = move(guide.tripHash);
+					guideResults[r].nniMoves = ROUND_NN - guide.rNN;
+				}
+			};
+
+			const int workerCount = min(guideWorkers, n);
+			vector<future<void> > futures;
+			for (int worker = 1; worker < workerCount; worker++) {
+				futures.push_back(async(launch::async, executeGuides));
+			}
+			executeGuides();
+			for (future<void> &result: futures) result.get();
+
+			for (int r = 0; r < n; r++){
+				LOG << "Guide Tree " << r << "/" << n << endl;
+				if (ROUND_NN >= 0) {
+					LOG << "#NNI moves:" << guideResults[r].nniMoves
+						<< "/" << ROUND_NN << endl;
+				}
+				alg.addTripartitions(guideResults[r].tripHash);
+			}
+#else
 			pAlg.taxonHash[0] = -hashsum;
 			alg.taxonHash[0] = -hashsum;
 			for (int r = 0; r < n; r++){
@@ -1579,9 +1650,12 @@ struct ConstrainedOptimizationAlgorithm{
 				pAlg.orderId = 0;
 				pAlg.rNN = ROUND_NN;
 			}
+#endif
 			alg.computeOptimalTree();
 			alg.createPlacementAlgorithm(pAlg, 1);
+#ifndef CASTER_CONCURRENT_GUIDES
 			pAlg.taxonHash[0] = taxonHash[0];
+#endif
 		}
 		else{
 			for (int i = 0; i < N; i++) order.push_back(i);
@@ -1869,6 +1943,7 @@ struct MetaAlgorithm{
 
 	vector<string> files, names;
 	int nThreads = 1, nRounds = 4, nSample = 4, support = 1;
+	int nGuideWorkers = 1;
 	double p = 0.25, lambda = 0.5;
 	string outputFile, guideFile, constraintFile, constraintTree, guideTree;
 	ofstream fileOut;
@@ -1904,6 +1979,14 @@ struct MetaAlgorithm{
 		ARG.addIntArg('s', "subsample", 4, "Number of rounds of subsampling per exploration step");
 		ARG.addDoubleArg(0, "proportion", 0.25, "Proportion of taxa in the subsample in naive algorithm");
 		ARG.addIntArg('t', "thread", 1, "Number of threads", true);
+#ifdef CASTER_CONCURRENT_GUIDES
+		ARG.addIntArg(
+			0,
+			"guide-workers",
+			1,
+			"Number of concurrent initial guide searches"
+		);
+#endif
 		ARG.addIntArg(0, "seed", 233, "Seed for pseudorandomness");
 		ARG.addIntArg('v', "verbose", 2, "Level of logging (1: minimum, 2: normal)");
 		ARG.addStringArg(0, "root", "", "Root at the given species");
@@ -1932,6 +2015,11 @@ struct MetaAlgorithm{
 	void initialize(int argc, char** argv, string dummy1 = "", string dummy2 = "") {
 		staticInitialize(argc, argv);
 		initialize();
+#ifdef CASTER_CONCURRENT_GUIDES
+		if (nGuideWorkers <= 0) {
+			throw invalid_argument("guide workers must be positive");
+		}
+#endif
 	}
 
 	void initialize(){
@@ -1942,6 +2030,9 @@ struct MetaAlgorithm{
 		nSample = ARG.getIntArg("subsample");
 		p = ARG.getDoubleArg("proportion");
 		nThreads = ARG.getIntArg("thread");
+#ifdef CASTER_CONCURRENT_GUIDES
+		nGuideWorkers = ARG.getIntArg("guide-workers");
+#endif
 		lambda = ARG.getDoubleArg("lambda");
 		support = ARG.getIntArg("support");
 		srand(ARG.getIntArg("seed"));
@@ -1980,6 +2071,9 @@ struct MetaAlgorithm{
 		LOG << "#Rounds: " << nRounds << endl;
 		LOG << "#Samples: " << nSample << endl;
 		LOG << "#Threads: " << nThreads << endl;
+#ifdef CASTER_CONCURRENT_GUIDES
+		LOG << "#Guide workers: " << nGuideWorkers << endl;
+#endif
 		
 		if (constraintFile != ""){
 			ifstream fin(constraintFile);
@@ -1990,6 +2084,9 @@ struct MetaAlgorithm{
 		}
 		
 		ConstrainedOptimizationAlgorithm alg(names.size(), tripInit, names, TP, ROUND_NN);
+#ifdef CASTER_CONCURRENT_GUIDES
+		alg.guideWorkers = nGuideWorkers;
+#endif
 		
 		if (guideFile != ""){
 			ifstream fin(guideFile);

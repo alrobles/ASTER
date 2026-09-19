@@ -1,11 +1,13 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <future>
 #include <iomanip>
 #include <iostream>
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "caster-site-workflow.hpp"
@@ -20,6 +22,7 @@ namespace {
 using caster_accelerator::ExecutionResult;
 using caster_accelerator::Operation;
 using caster_accelerator::OperationKind;
+using caster_accelerator::OperationRecorder;
 using caster_accelerator::ResidentDataset;
 using caster_accelerator::TapeBatch;
 
@@ -103,6 +106,28 @@ void requireEqualCounts(
 
 void requireInvalidTapeChecks(const ResidentDataset& dataset) {
     {
+        try {
+            OperationRecorder recorder(std::vector<int8_t>{3});
+            throw std::runtime_error(
+                "invalid recorder colors were accepted"
+            );
+        }
+        catch (const std::invalid_argument&) {
+        }
+    }
+    {
+        OperationRecorder recorder(dataset.taxa);
+        recorder.recordScore();
+        try {
+            recorder.batch();
+            throw std::runtime_error(
+                "operation tape with a pending score was accepted"
+            );
+        }
+        catch (const std::logic_error&) {
+        }
+    }
+    {
         std::vector<int8_t> colors = dataset.initialColors;
         const TapeBatch batch{
             {{
@@ -151,6 +176,151 @@ void requireInvalidTapeChecks(const ResidentDataset& dataset) {
     }
 }
 
+void requireConcurrentPrivateState(
+    TripartitionInitializer& initializer,
+    const std::vector<int8_t>& colors,
+    int threads,
+    const std::vector<uint16_t>& expectedCounts,
+    const std::vector<double>& expectedScores
+) {
+    const auto run = [&initializer, &colors, threads]() {
+        Tripartition tripartition(initializer);
+        const std::vector<double> scores =
+            initializeProduction(tripartition, colors, threads);
+        return std::make_pair(
+            caster_accelerator::productionCounts(tripartition),
+            scores
+        );
+    };
+    std::future<std::pair<std::vector<uint16_t>, std::vector<double>>> first =
+        std::async(std::launch::async, run);
+    std::future<std::pair<std::vector<uint16_t>, std::vector<double>>> second =
+        std::async(std::launch::async, run);
+    const auto firstResult = first.get();
+    const auto secondResult = second.get();
+    requireEqualCounts(expectedCounts, firstResult.first);
+    requireEqualCounts(expectedCounts, secondResult.first);
+    caster_accelerator::validateScores(expectedScores, firstResult.second);
+    caster_accelerator::validateScores(expectedScores, secondResult.second);
+}
+
+void requireProductionTapeReplay(
+    Workflow& workflow,
+    const ResidentDataset& sourceDataset,
+    uint32_t blockSize
+) {
+#if !defined(__HIPCC__) && !defined(__CUDACC__)
+    (void) blockSize;
+#endif
+    ResidentDataset dataset = sourceDataset;
+    dataset.initialColors.assign(dataset.taxa, -1);
+    dataset.initialCounts.assign(dataset.sites * 12, 0);
+
+    ThreadPool threadPool(workflow.tripInit.nThreads);
+    const int roundNN =
+        20 + 2 * std::sqrt(dataset.taxa) * std::log2(dataset.taxa);
+    ConstrainedOptimizationAlgorithm algorithm(
+        dataset.taxa,
+        workflow.tripInit,
+        workflow.names,
+        threadPool,
+        roundNN
+    );
+    OperationRecorder recorder(dataset.taxa);
+    PlacementAlgorithm placement(
+        algorithm.taxonHash,
+        workflow.tripInit,
+        threadPool,
+        roundNN,
+        &recorder
+    );
+    algorithm.createPlacementAlgorithm(placement, 1.0);
+    placement.run();
+
+    caster_accelerator::CpuResidentExecutor executor(dataset);
+    const ExecutionResult replay = executor.execute(recorder.batch());
+    caster_accelerator::validateScores(recorder.scores(), replay.scores);
+    requireEqualCounts(
+        caster_accelerator::productionCounts(placement.trip),
+        executor.currentCounts()
+    );
+    std::cout << "production_tape_operations="
+              << recorder.batch().operations.size() << '\n';
+    std::cout << "production_tape_scores="
+              << recorder.batch().scoreCount << '\n';
+#if defined(__HIPCC__) || defined(__CUDACC__)
+    caster_accelerator::PortableHipExecutor hipExecutor(
+        dataset,
+        recorder.batch().operations.size(),
+        recorder.batch().scoreCount,
+        blockSize
+    );
+    const caster_accelerator::HipBatchResult hipReplay =
+        hipExecutor.execute(recorder.batch());
+    caster_accelerator::validateScoreBounds(
+        recorder.scores(),
+        hipReplay.scores,
+        hipReplay.errorBounds
+    );
+    requireEqualCounts(
+        caster_accelerator::productionCounts(placement.trip),
+        hipExecutor.downloadCounts()
+    );
+    double maximumError = 0.0;
+    double maximumBound = 0.0;
+    for (size_t index = 0; index < hipReplay.scores.size(); ++index) {
+        maximumError = std::max(
+            maximumError,
+            std::abs(recorder.scores()[index] - hipReplay.scores[index])
+        );
+        maximumBound = std::max(
+            maximumBound,
+            hipReplay.errorBounds[index]
+        );
+    }
+    std::cout << "production_tape_max_score_error="
+              << maximumError << '\n';
+    std::cout << "production_tape_max_error_bound="
+              << maximumBound << '\n';
+    std::cout << "production_tape_hip_validation=passed\n";
+#endif
+    std::cout << "production_tape_validation=passed\n";
+}
+
+void requireNumericFallback() {
+    const caster_accelerator::ScoreDecision separated =
+        caster_accelerator::compareScoreEstimates(
+            2.0,
+            0.1,
+            1.0,
+            0.1,
+            2.0,
+            1.0,
+            ERROR_TOLERANCE
+        );
+    if (!separated.candidateBetter || separated.usedCpuFallback) {
+        throw std::runtime_error(
+            "separated score intervals did not use the device result"
+        );
+    }
+    const caster_accelerator::ScoreDecision nearTie =
+        caster_accelerator::compareScoreEstimates(
+            1.0000001,
+            0.001,
+            1.0,
+            0.001,
+            1.0,
+            1.0,
+            ERROR_TOLERANCE
+        );
+    if (nearTie.candidateBetter || !nearTie.usedCpuFallback) {
+        throw std::runtime_error(
+            "overlapping score intervals did not use CPU fallback"
+        );
+    }
+    std::cout << "numeric_fallback_validation=passed\n";
+}
+
 }
 
 int main(int argc, char** argv) {
@@ -182,6 +352,15 @@ int main(int argc, char** argv) {
             "accelerator-block-size",
             256,
             "HIP workgroup size"
+        );
+        bool validateProductionTape = false;
+        ARG.addFlag(
+            0,
+            "accelerator-production-tape",
+            "Capture and replay one production placement search",
+            [&validateProductionTape]() {
+                validateProductionTape = true;
+            }
         );
         Workflow workflow(argc, argv);
 
@@ -227,9 +406,44 @@ int main(int argc, char** argv) {
                 dataset.initialColors,
                 workflow.tripInit.nThreads
             );
+        const std::vector<uint16_t> productionInitialCounts =
+            caster_accelerator::productionCounts(production);
         requireEqualCounts(
-            caster_accelerator::productionCounts(workflow.tripInit),
+            productionInitialCounts,
             dataset.initialCounts
+        );
+        Tripartition independentProduction(workflow.tripInit);
+        requireEqualCounts(
+            productionInitialCounts,
+            caster_accelerator::productionCounts(production)
+        );
+        requireConcurrentPrivateState(
+            workflow.tripInit,
+            dataset.initialColors,
+            workflow.tripInit.nThreads,
+            productionInitialCounts,
+            productionInitialScore
+        );
+        requireNumericFallback();
+        if (validateProductionTape) {
+            requireProductionTapeReplay(
+                workflow,
+                dataset,
+                static_cast<uint32_t>(blockSize)
+            );
+        }
+        initializeProduction(
+            independentProduction,
+            dataset.initialColors,
+            workflow.tripInit.nThreads
+        );
+        requireEqualCounts(
+            productionInitialCounts,
+            caster_accelerator::productionCounts(independentProduction)
+        );
+        requireEqualCounts(
+            productionInitialCounts,
+            caster_accelerator::productionCounts(production)
         );
 
         caster_accelerator::CpuResidentExecutor executor(dataset);
@@ -249,7 +463,7 @@ int main(int argc, char** argv) {
             acceleratorInitialScore.milliseconds;
         size_t totalScores = 0;
 
-#ifdef __HIPCC__
+#if defined(__HIPCC__) || defined(__CUDACC__)
         size_t maxOperations = initialScoreBatch.operations.size();
         size_t maxScores = initialScoreBatch.scoreCount;
         for (const TapeBatch& batch : batches) {
@@ -267,6 +481,11 @@ int main(int argc, char** argv) {
         caster_accelerator::validateScores(
             productionInitialScore,
             hipInitialScore.scores
+        );
+        caster_accelerator::validateScoreBounds(
+            productionInitialScore,
+            hipInitialScore.scores,
+            hipInitialScore.errorBounds
         );
         double hipTapeUploadMilliseconds =
             hipInitialScore.tapeUploadMilliseconds;
@@ -293,12 +512,17 @@ int main(int argc, char** argv) {
                 expected.scores,
                 actual.scores
             );
-#ifdef __HIPCC__
+#if defined(__HIPCC__) || defined(__CUDACC__)
             const caster_accelerator::HipBatchResult hipResult =
                 hipExecutor.execute(batch);
             caster_accelerator::validateScores(
                 expected.scores,
                 hipResult.scores
+            );
+            caster_accelerator::validateScoreBounds(
+                expected.scores,
+                hipResult.scores,
+                hipResult.errorBounds
             );
             hipTapeUploadMilliseconds +=
                 hipResult.tapeUploadMilliseconds;
@@ -309,7 +533,7 @@ int main(int argc, char** argv) {
                 hipResult.hostReductionMilliseconds;
 #endif
             requireEqualCounts(
-                caster_accelerator::productionCounts(workflow.tripInit),
+                caster_accelerator::productionCounts(production),
                 executor.currentCounts()
             );
             productionMilliseconds += expected.milliseconds;
@@ -317,9 +541,9 @@ int main(int argc, char** argv) {
             totalScores += actual.scores.size();
         }
 
-#ifdef __HIPCC__
+#if defined(__HIPCC__) || defined(__CUDACC__)
         requireEqualCounts(
-            caster_accelerator::productionCounts(workflow.tripInit),
+            caster_accelerator::productionCounts(production),
             hipExecutor.downloadCounts()
         );
         hipDeviceProp_t properties{};
@@ -347,7 +571,7 @@ int main(int argc, char** argv) {
         std::cout << "production_ms=" << productionMilliseconds << '\n';
         std::cout << "accelerator_cpu_ms="
                   << acceleratorCpuMilliseconds << '\n';
-#ifdef __HIPCC__
+#if defined(__HIPCC__) || defined(__CUDACC__)
         std::cout << "hip_device=" << properties.name << '\n';
         std::cout << "hip_blocks=" << hipExecutor.blocks() << '\n';
         std::cout << "hip_device_allocation_bytes="
@@ -365,6 +589,8 @@ int main(int argc, char** argv) {
                   << hipHostReductionMilliseconds << '\n';
 #endif
         std::cout << "invalid_input_validation=passed\n";
+        std::cout << "private_state_validation=passed\n";
+        std::cout << "concurrent_private_state_validation=passed\n";
         std::cout << "validation=passed\n";
         return 0;
     }

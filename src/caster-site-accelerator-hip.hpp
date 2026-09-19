@@ -21,6 +21,7 @@ namespace caster_accelerator {
 
 struct HipBatchResult {
     std::vector<double> scores;
+    std::vector<double> errorBounds;
     double tapeUploadMilliseconds;
     double kernelMilliseconds;
     double scoreDownloadMilliseconds;
@@ -44,9 +45,11 @@ __global__ void executeTapeKernel(
     const Operation* operations,
     size_t operationCount,
     uint16_t* counts,
-    double* partialScores
+    double* partialScores,
+    double* partialMagnitudes
 ) {
     extern __shared__ double sharedScores[];
+    double* sharedMagnitudes = sharedScores + blockDim.x;
     const uint64_t site =
         static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     const bool active = site < sites;
@@ -92,14 +95,18 @@ __global__ void executeTapeKernel(
             continue;
         }
 
-        sharedScores[threadIdx.x] = active
-            ? scorePosition(siteCounts, partition.frequencies)
-            : 0.0;
+        const ScorePositionResult position = active
+            ? scorePositionResult(siteCounts, partition.frequencies)
+            : ScorePositionResult{0.0, 0.0};
+        sharedScores[threadIdx.x] = position.score;
+        sharedMagnitudes[threadIdx.x] = position.magnitude;
         __syncthreads();
         for (uint32_t stride = blockDim.x / 2; stride > 0; stride /= 2) {
             if (threadIdx.x < stride) {
                 sharedScores[threadIdx.x] +=
                     sharedScores[threadIdx.x + stride];
+                sharedMagnitudes[threadIdx.x] +=
+                    sharedMagnitudes[threadIdx.x + stride];
             }
             __syncthreads();
         }
@@ -107,6 +114,9 @@ __global__ void executeTapeKernel(
             partialScores[
                 scoreIndex * static_cast<size_t>(gridDim.x) + blockIdx.x
             ] = sharedScores[0];
+            partialMagnitudes[
+                scoreIndex * static_cast<size_t>(gridDim.x) + blockIdx.x
+            ] = sharedMagnitudes[0];
         }
         __syncthreads();
         ++scoreIndex;
@@ -126,8 +136,10 @@ class PortableHipExecutor {
     Operation* deviceOperations = nullptr;
     uint16_t* deviceCounts = nullptr;
     double* devicePartials = nullptr;
+    double* deviceMagnitudes = nullptr;
     Operation* hostOperations = nullptr;
     double* hostPartials = nullptr;
+    double* hostMagnitudes = nullptr;
     std::vector<int8_t> colors;
     bool usable = true;
     double allocationMillisecondsValue = 0.0;
@@ -219,6 +231,11 @@ public:
                 maxScores * blockCount,
                 "hipMalloc partial scores"
             );
+            allocate(
+                deviceMagnitudes,
+                maxScores * blockCount,
+                "hipMalloc partial magnitudes"
+            );
             checkHip(
                 hipHostMalloc(
                     reinterpret_cast<void**>(&hostOperations),
@@ -233,6 +250,13 @@ public:
                 ),
                 "hipHostMalloc partial scores"
             );
+            checkHip(
+                hipHostMalloc(
+                    reinterpret_cast<void**>(&hostMagnitudes),
+                    maxScores * blockCount * sizeof(double)
+                ),
+                "hipHostMalloc partial magnitudes"
+            );
             checkHip(hipDeviceSynchronize(), "allocation synchronize");
             const auto allocationStop = std::chrono::steady_clock::now();
             allocationMillisecondsValue =
@@ -245,7 +269,7 @@ public:
                 + dataset.sitePartitions.size() * sizeof(uint32_t)
                 + maxOperations * sizeof(Operation)
                 + dataset.initialCounts.size() * sizeof(uint16_t)
-                + maxScores * blockCount * sizeof(double);
+                + 2 * maxScores * blockCount * sizeof(double);
 
             const auto uploadStart = std::chrono::steady_clock::now();
             copyToDevice(
@@ -333,7 +357,7 @@ public:
                 executeTapeKernel,
                 dim3(blockCount),
                 dim3(blockSize),
-                blockSize * sizeof(double),
+                2 * blockSize * sizeof(double),
                 0,
                 deviceStates,
                 devicePartitions,
@@ -343,7 +367,8 @@ public:
                 deviceOperations,
                 batch.operations.size(),
                 deviceCounts,
-                devicePartials
+                devicePartials,
+                deviceMagnitudes
             );
             checkHip(hipGetLastError(), "executeTapeKernel launch");
             checkHip(
@@ -363,6 +388,15 @@ public:
                 ),
                 "hipMemcpy partial scores"
             );
+            checkHip(
+                hipMemcpy(
+                    hostMagnitudes,
+                    deviceMagnitudes,
+                    partialCount * sizeof(double),
+                    hipMemcpyDeviceToHost
+                ),
+                "hipMemcpy partial magnitudes"
+            );
             downloadStop = std::chrono::steady_clock::now();
         }
         catch (...) {
@@ -372,17 +406,27 @@ public:
 
         const auto reductionStart = std::chrono::steady_clock::now();
         std::vector<double> scores(batch.scoreCount, 0.0);
+        std::vector<double> errorBounds(batch.scoreCount, 0.0);
         for (size_t score = 0; score < batch.scoreCount; ++score) {
+            double magnitude = 0.0;
             for (uint32_t block = 0; block < blockCount; ++block) {
                 scores[score] +=
                     hostPartials[score * blockCount + block];
+                magnitude +=
+                    hostMagnitudes[score * blockCount + block];
             }
+            errorBounds[score] = conservativeScoreErrorBound(
+                magnitude,
+                dataset.sites,
+                blockCount
+            );
         }
         const auto reductionStop = std::chrono::steady_clock::now();
         colors.swap(nextColors);
 
         return {
             std::move(scores),
+            std::move(errorBounds),
             elapsedMilliseconds(tapeUploadStart, tapeUploadStop),
             elapsedMilliseconds(kernelStart, kernelStop),
             elapsedMilliseconds(downloadStart, downloadStop),
@@ -459,6 +503,10 @@ private:
     }
 
     void release() {
+        if (hostMagnitudes != nullptr) {
+            (void) hipHostFree(hostMagnitudes);
+            hostMagnitudes = nullptr;
+        }
         if (hostPartials != nullptr) {
             (void) hipHostFree(hostPartials);
             hostPartials = nullptr;
@@ -470,6 +518,10 @@ private:
         if (devicePartials != nullptr) {
             (void) hipFree(devicePartials);
             devicePartials = nullptr;
+        }
+        if (deviceMagnitudes != nullptr) {
+            (void) hipFree(deviceMagnitudes);
+            deviceMagnitudes = nullptr;
         }
         if (deviceCounts != nullptr) {
             (void) hipFree(deviceCounts);

@@ -11,6 +11,8 @@
 #include <stdexcept>
 #include <vector>
 
+#include "caster-site-operation-tape.hpp"
+
 #if defined(__HIPCC__) || defined(__CUDACC__)
 #define CASTER_ACCELERATOR_HD __host__ __device__
 #else
@@ -18,19 +20,6 @@
 #endif
 
 namespace caster_accelerator {
-
-enum class OperationKind : uint8_t {
-    Update,
-    ScoreTripartition
-};
-
-struct Operation {
-    uint32_t taxon;
-    int8_t from;
-    int8_t to;
-    OperationKind kind;
-    uint8_t reserved;
-};
 
 struct SpeciesRange {
     uint32_t begin;
@@ -45,7 +34,6 @@ struct Partition {
     float frequencies[4];
 };
 
-static_assert(sizeof(Operation) == 8, "Operation layout must be stable");
 static_assert(sizeof(SpeciesRange) == 8, "SpeciesRange layout must be stable");
 static_assert(sizeof(Partition) == 40, "Partition layout must be stable");
 
@@ -60,14 +48,14 @@ struct ResidentDataset {
     std::vector<uint16_t> initialCounts;
 };
 
-struct TapeBatch {
-    std::vector<Operation> operations;
-    size_t scoreCount;
-};
-
 struct ExecutionResult {
     std::vector<double> scores;
     double milliseconds;
+};
+
+struct ScoreDecision {
+    bool candidateBetter;
+    bool usedCpuFallback;
 };
 
 CASTER_ACCELERATOR_HD inline int64_t xxyy(
@@ -86,7 +74,16 @@ CASTER_ACCELERATOR_HD inline int64_t xxyy(
         + y2 * (y2 - 1) * x0 * x1;
 }
 
-CASTER_ACCELERATOR_HD inline double scorePosition(
+struct ScorePositionResult {
+    double score;
+    double magnitude;
+};
+
+CASTER_ACCELERATOR_HD inline double absoluteValue(double value) {
+    return value < 0 ? -value : value;
+}
+
+CASTER_ACCELERATOR_HD inline ScorePositionResult scorePositionResult(
     const uint16_t* counts,
     const float* frequencies
 ) {
@@ -128,10 +125,25 @@ CASTER_ACCELERATOR_HD inline double scorePosition(
     const int64_t ggcc = xxyy(g0, g1, g2, c0, c1, c2);
     const int64_t ggtt = xxyy(g0, g1, g2, t0, t1, t2);
 
-    return rryy * r2 * y2
-        - (aayy + ggyy) * (r * r) * y2
-        - (rrcc + rrtt) * r2 * (y * y)
-        + (aacc + aatt + ggcc + ggtt) * (r * r) * (y * y);
+    const double first = rryy * r2 * y2;
+    const double second = (aayy + ggyy) * (r * r) * y2;
+    const double third = (rrcc + rrtt) * r2 * (y * y);
+    const double fourth =
+        (aacc + aatt + ggcc + ggtt) * (r * r) * (y * y);
+    return {
+        first - second - third + fourth,
+        absoluteValue(first)
+            + absoluteValue(second)
+            + absoluteValue(third)
+            + absoluteValue(fourth)
+    };
+}
+
+CASTER_ACCELERATOR_HD inline double scorePosition(
+    const uint16_t* counts,
+    const float* frequencies
+) {
+    return scorePositionResult(counts, frequencies).score;
 }
 
 inline uint8_t encodeBase(char base) {
@@ -473,17 +485,17 @@ public:
 };
 
 inline std::vector<uint16_t> productionCounts(
-    const TripartitionInitializer& initializer
+    const Tripartition& tripartition
 ) {
     size_t sites = 0;
-    for (const TripartitionInitializer::Gene& gene : initializer.genes) {
+    for (const TripartitionInitializer::Gene& gene : tripartition.genes) {
         if (gene.nRep == 0) {
             sites += gene.nKernal;
         }
     }
     std::vector<uint16_t> counts;
     counts.reserve(sites * 12);
-    for (const TripartitionInitializer::Gene& gene : initializer.genes) {
+    for (const TripartitionInitializer::Gene& gene : tripartition.genes) {
         if (gene.nRep != 0) {
             throw std::invalid_argument(
                 "production counter extraction requires nRep == 0"
@@ -523,6 +535,94 @@ inline void validateScores(
             );
         }
     }
+}
+
+inline double conservativeScoreErrorBound(
+    double magnitude,
+    uint64_t sites,
+    uint32_t blocks
+) {
+    const long double epsilon =
+        std::numeric_limits<double>::epsilon();
+    const long double operations =
+        512.0L
+        + 4.0L * static_cast<long double>(sites)
+        + 2.0L * static_cast<long double>(blocks);
+    const long double product = operations * epsilon;
+    if (product >= 1.0L) {
+        return std::numeric_limits<double>::infinity();
+    }
+    const long double gamma = product / (1.0L - product);
+    if (gamma >= 1.0L) {
+        return std::numeric_limits<double>::infinity();
+    }
+    return std::nextafter(
+        static_cast<double>(
+            2.0L * gamma * magnitude / (1.0L - gamma)
+        ),
+        std::numeric_limits<double>::infinity()
+    );
+}
+
+inline void validateScoreBounds(
+    const std::vector<double>& expected,
+    const std::vector<double>& actual,
+    const std::vector<double>& errorBounds
+) {
+    if (
+        expected.size() != actual.size()
+        || expected.size() != errorBounds.size()
+    ) {
+        throw std::runtime_error("bounded score count mismatch");
+    }
+    for (size_t index = 0; index < expected.size(); ++index) {
+        if (
+            errorBounds[index] < 0
+            || std::abs(expected[index] - actual[index])
+                > errorBounds[index]
+        ) {
+            throw std::runtime_error(
+                "score exceeded error bound at index "
+                    + std::to_string(index)
+            );
+        }
+    }
+}
+
+inline ScoreDecision compareScoreEstimates(
+    double candidate,
+    double candidateError,
+    double incumbent,
+    double incumbentError,
+    double cpuCandidate,
+    double cpuIncumbent,
+    double tolerance
+) {
+    if (
+        candidateError < 0
+        || incumbentError < 0
+        || tolerance < 0
+    ) {
+        throw std::invalid_argument(
+            "score bounds and tolerance must be nonnegative"
+        );
+    }
+    if (
+        candidate - candidateError
+        > incumbent + incumbentError + tolerance
+    ) {
+        return {true, false};
+    }
+    if (
+        candidate + candidateError + tolerance
+        <= incumbent - incumbentError
+    ) {
+        return {false, false};
+    }
+    return {
+        cpuIncumbent + tolerance < cpuCandidate,
+        true
+    };
 }
 
 }
