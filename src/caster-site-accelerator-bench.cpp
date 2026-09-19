@@ -306,7 +306,7 @@ int main(int argc, char** argv) {
             acceleratorInitialScore.milliseconds;
         size_t totalScores = 0;
 
-#ifdef __HIPCC__
+#if defined(__HIPCC__) || defined(__CUDACC__)
         size_t maxOperations = initialScoreBatch.operations.size();
         size_t maxScores = initialScoreBatch.scoreCount;
         for (const TapeBatch& batch : batches) {
@@ -350,7 +350,7 @@ int main(int argc, char** argv) {
                 expected.scores,
                 actual.scores
             );
-#ifdef __HIPCC__
+#if defined(__HIPCC__) || defined(__CUDACC__)
             const caster_accelerator::HipBatchResult hipResult =
                 hipExecutor.execute(batch);
             caster_accelerator::validateScores(
@@ -374,7 +374,7 @@ int main(int argc, char** argv) {
             totalScores += actual.scores.size();
         }
 
-#ifdef __HIPCC__
+#if defined(__HIPCC__) || defined(__CUDACC__)
         requireEqualCounts(
             caster_accelerator::productionCounts(production),
             hipExecutor.downloadCounts()
@@ -404,7 +404,7 @@ int main(int argc, char** argv) {
         std::cout << "production_ms=" << productionMilliseconds << '\n';
         std::cout << "accelerator_cpu_ms="
                   << acceleratorCpuMilliseconds << '\n';
-#ifdef __HIPCC__
+#if defined(__HIPCC__) || defined(__CUDACC__)
         std::cout << "hip_device=" << properties.name << '\n';
         std::cout << "hip_blocks=" << hipExecutor.blocks() << '\n';
         std::cout << "hip_device_allocation_bytes="
