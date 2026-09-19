@@ -44,6 +44,7 @@ typedef unsigned __int128 hash_t;
 
 #include "incbeta.c"
 #include "argparser.hpp"
+#include "caster-site-operation-tape.hpp"
 #include "threadpool.hpp"
 #include "speciestree.hpp"
 
@@ -187,9 +188,11 @@ struct PlacementAlgorithm{
 	Tripartition trip;
 	const int ROUND_NN = -1;
 	ThreadPool &TP;
+	caster_accelerator::OperationRecorder *operationRecorder;
 	
-	PlacementAlgorithm(const vector<hash_t> &taxonHash, TripartitionInitializer &tripInit, ThreadPool& TP, int ROUND_NN):
-		taxonHash(taxonHash), rNN(ROUND_NN), trip(tripInit), ROUND_NN(ROUND_NN), TP(TP) {}
+	PlacementAlgorithm(const vector<hash_t> &taxonHash, TripartitionInitializer &tripInit, ThreadPool& TP, int ROUND_NN,
+			caster_accelerator::OperationRecorder *operationRecorder = nullptr):
+		taxonHash(taxonHash), rNN(ROUND_NN), trip(tripInit), ROUND_NN(ROUND_NN), TP(TP), operationRecorder(operationRecorder) {}
 	
 	int& heavy(int v){
 		return nodes[v].heavy;
@@ -285,6 +288,7 @@ struct PlacementAlgorithm{
 	}
 	
 	void tripUpdateSet(int tgt, int i){
+		if (operationRecorder != nullptr) operationRecorder->recordUpdate(i, tgt);
 		Tripartition &t = trip;
 		TP.push([=, &t](int part)->score_t{t.updatePart(part, tgt, i); return 0;});
 	}
@@ -294,12 +298,15 @@ struct PlacementAlgorithm{
 	}
 
 	void tripScoreSet(){
+		if (operationRecorder != nullptr) operationRecorder->recordScore();
 		Tripartition &t = trip;
 		TP.push([=, &t](int part)->score_t{return t.scorePart(part);});
 	}
 
 	score_t tripScoreGet(){
-		return TP.pop();
+		score_t result = TP.pop();
+		if (operationRecorder != nullptr) operationRecorder->recordScoreResult(result);
+		return result;
 	}
 
 	score_t tripScore(){

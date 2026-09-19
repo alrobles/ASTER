@@ -11,6 +11,8 @@
 #include <stdexcept>
 #include <vector>
 
+#include "caster-site-operation-tape.hpp"
+
 #if defined(__HIPCC__) || defined(__CUDACC__)
 #define CASTER_ACCELERATOR_HD __host__ __device__
 #else
@@ -18,19 +20,6 @@
 #endif
 
 namespace caster_accelerator {
-
-enum class OperationKind : uint8_t {
-    Update,
-    ScoreTripartition
-};
-
-struct Operation {
-    uint32_t taxon;
-    int8_t from;
-    int8_t to;
-    OperationKind kind;
-    uint8_t reserved;
-};
 
 struct SpeciesRange {
     uint32_t begin;
@@ -45,7 +34,6 @@ struct Partition {
     float frequencies[4];
 };
 
-static_assert(sizeof(Operation) == 8, "Operation layout must be stable");
 static_assert(sizeof(SpeciesRange) == 8, "SpeciesRange layout must be stable");
 static_assert(sizeof(Partition) == 40, "Partition layout must be stable");
 
@@ -58,11 +46,6 @@ struct ResidentDataset {
     std::vector<uint32_t> sitePartitions;
     std::vector<int8_t> initialColors;
     std::vector<uint16_t> initialCounts;
-};
-
-struct TapeBatch {
-    std::vector<Operation> operations;
-    size_t scoreCount;
 };
 
 struct ExecutionResult {

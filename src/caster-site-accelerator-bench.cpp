@@ -22,6 +22,7 @@ namespace {
 using caster_accelerator::ExecutionResult;
 using caster_accelerator::Operation;
 using caster_accelerator::OperationKind;
+using caster_accelerator::OperationRecorder;
 using caster_accelerator::ResidentDataset;
 using caster_accelerator::TapeBatch;
 
@@ -105,6 +106,28 @@ void requireEqualCounts(
 
 void requireInvalidTapeChecks(const ResidentDataset& dataset) {
     {
+        try {
+            OperationRecorder recorder(std::vector<int8_t>{3});
+            throw std::runtime_error(
+                "invalid recorder colors were accepted"
+            );
+        }
+        catch (const std::invalid_argument&) {
+        }
+    }
+    {
+        OperationRecorder recorder(dataset.taxa);
+        recorder.recordScore();
+        try {
+            recorder.batch();
+            throw std::runtime_error(
+                "operation tape with a pending score was accepted"
+            );
+        }
+        catch (const std::logic_error&) {
+        }
+    }
+    {
         std::vector<int8_t> colors = dataset.initialColors;
         const TapeBatch batch{
             {{
@@ -179,6 +202,49 @@ void requireConcurrentPrivateState(
     requireEqualCounts(expectedCounts, secondResult.first);
     caster_accelerator::validateScores(expectedScores, firstResult.second);
     caster_accelerator::validateScores(expectedScores, secondResult.second);
+}
+
+void requireProductionTapeReplay(
+    Workflow& workflow,
+    const ResidentDataset& sourceDataset
+) {
+    ResidentDataset dataset = sourceDataset;
+    dataset.initialColors.assign(dataset.taxa, -1);
+    dataset.initialCounts.assign(dataset.sites * 12, 0);
+
+    ThreadPool threadPool(workflow.tripInit.nThreads);
+    const int roundNN =
+        20 + 2 * std::sqrt(dataset.taxa) * std::log2(dataset.taxa);
+    ConstrainedOptimizationAlgorithm algorithm(
+        dataset.taxa,
+        workflow.tripInit,
+        workflow.names,
+        threadPool,
+        roundNN
+    );
+    OperationRecorder recorder(dataset.taxa);
+    PlacementAlgorithm placement(
+        algorithm.taxonHash,
+        workflow.tripInit,
+        threadPool,
+        roundNN,
+        &recorder
+    );
+    algorithm.createPlacementAlgorithm(placement, 1.0);
+    placement.run();
+
+    caster_accelerator::CpuResidentExecutor executor(dataset);
+    const ExecutionResult replay = executor.execute(recorder.batch());
+    caster_accelerator::validateScores(recorder.scores(), replay.scores);
+    requireEqualCounts(
+        caster_accelerator::productionCounts(placement.trip),
+        executor.currentCounts()
+    );
+    std::cout << "production_tape_operations="
+              << recorder.batch().operations.size() << '\n';
+    std::cout << "production_tape_scores="
+              << recorder.batch().scoreCount << '\n';
+    std::cout << "production_tape_validation=passed\n";
 }
 
 }
@@ -275,6 +341,7 @@ int main(int argc, char** argv) {
             productionInitialCounts,
             productionInitialScore
         );
+        requireProductionTapeReplay(workflow, dataset);
         initializeProduction(
             independentProduction,
             dataset.initialColors,
