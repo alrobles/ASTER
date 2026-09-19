@@ -34,22 +34,26 @@ make -C "$ROOT" -f GNUmakefile caster-site-strict
 run_case() {
     local label=$1
     local workers=$2
-    local started
-    local finished
-    started=$(date +%s.%N)
-    "$ROOT/bin/caster-site-strict" \
-        -t 1 \
-        --guide-workers "$workers" \
-        -r 1 \
-        -s 0 \
-        --seed 233 \
-        "$INPUT" \
-        > "$OUT_ROOT/$label.tree" \
-        2> "$OUT_ROOT/$label.log"
-    finished=$(date +%s.%N)
-    awk -v started="$started" -v finished="$finished" \
-        'BEGIN { printf "%.6f\n", finished - started }' \
-        > "$OUT_ROOT/$label.elapsed_seconds"
+    local elapsed
+    local user_cpu
+    local system_cpu
+    TIMEFORMAT='%R %U %S'
+    {
+        time "$ROOT/bin/caster-site-strict" \
+            -t 1 \
+            --guide-workers "$workers" \
+            -r 1 \
+            -s 0 \
+            --seed 233 \
+            "$INPUT" \
+            > "$OUT_ROOT/$label.tree" \
+            2> "$OUT_ROOT/$label.log"
+    } 2> "$OUT_ROOT/$label.timing"
+    read -r elapsed user_cpu system_cpu < "$OUT_ROOT/$label.timing"
+    printf '%s\n' "$elapsed" > "$OUT_ROOT/$label.elapsed_seconds"
+    awk -v user_cpu="$user_cpu" -v system_cpu="$system_cpu" \
+        'BEGIN { printf "%.6f\n", user_cpu + system_cpu }' \
+        > "$OUT_ROOT/$label.cpu_seconds"
 }
 
 run_case sequential 1
@@ -68,3 +72,5 @@ echo "guide_workers=$GUIDE_WORKERS"
 sha256sum "$OUT_ROOT/sequential.tree" "$OUT_ROOT/concurrent.tree"
 echo "sequential_elapsed_seconds=$(cat "$OUT_ROOT/sequential.elapsed_seconds")"
 echo "concurrent_elapsed_seconds=$(cat "$OUT_ROOT/concurrent.elapsed_seconds")"
+echo "sequential_cpu_seconds=$(cat "$OUT_ROOT/sequential.cpu_seconds")"
+echo "concurrent_cpu_seconds=$(cat "$OUT_ROOT/concurrent.cpu_seconds")"
