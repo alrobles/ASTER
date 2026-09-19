@@ -358,6 +358,10 @@ struct Tripartition{
 			genes.emplace_back(g, TripartitionInitializer::Gene::PrivateSearchState{});
 		}
 	}
+	Tripartition(const Tripartition&) = delete;
+	Tripartition& operator=(const Tripartition&) = delete;
+	Tripartition(Tripartition&&) = default;
+	Tripartition& operator=(Tripartition&&) = delete;
 
 	void updatePart(int part, int x, int i){
 		int start = genes.size() * part / TI.nThreads, end = genes.size() * (1 + part) / TI.nThreads;
