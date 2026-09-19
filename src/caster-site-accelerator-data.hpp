@@ -53,6 +53,11 @@ struct ExecutionResult {
     double milliseconds;
 };
 
+struct ScoreDecision {
+    bool candidateBetter;
+    bool usedCpuFallback;
+};
+
 CASTER_ACCELERATOR_HD inline int64_t xxyy(
     int64_t x0,
     int64_t x1,
@@ -69,7 +74,16 @@ CASTER_ACCELERATOR_HD inline int64_t xxyy(
         + y2 * (y2 - 1) * x0 * x1;
 }
 
-CASTER_ACCELERATOR_HD inline double scorePosition(
+struct ScorePositionResult {
+    double score;
+    double magnitude;
+};
+
+CASTER_ACCELERATOR_HD inline double absoluteValue(double value) {
+    return value < 0 ? -value : value;
+}
+
+CASTER_ACCELERATOR_HD inline ScorePositionResult scorePositionResult(
     const uint16_t* counts,
     const float* frequencies
 ) {
@@ -111,10 +125,25 @@ CASTER_ACCELERATOR_HD inline double scorePosition(
     const int64_t ggcc = xxyy(g0, g1, g2, c0, c1, c2);
     const int64_t ggtt = xxyy(g0, g1, g2, t0, t1, t2);
 
-    return rryy * r2 * y2
-        - (aayy + ggyy) * (r * r) * y2
-        - (rrcc + rrtt) * r2 * (y * y)
-        + (aacc + aatt + ggcc + ggtt) * (r * r) * (y * y);
+    const double first = rryy * r2 * y2;
+    const double second = (aayy + ggyy) * (r * r) * y2;
+    const double third = (rrcc + rrtt) * r2 * (y * y);
+    const double fourth =
+        (aacc + aatt + ggcc + ggtt) * (r * r) * (y * y);
+    return {
+        first - second - third + fourth,
+        absoluteValue(first)
+            + absoluteValue(second)
+            + absoluteValue(third)
+            + absoluteValue(fourth)
+    };
+}
+
+CASTER_ACCELERATOR_HD inline double scorePosition(
+    const uint16_t* counts,
+    const float* frequencies
+) {
+    return scorePositionResult(counts, frequencies).score;
 }
 
 inline uint8_t encodeBase(char base) {
@@ -506,6 +535,94 @@ inline void validateScores(
             );
         }
     }
+}
+
+inline double conservativeScoreErrorBound(
+    double magnitude,
+    uint64_t sites,
+    uint32_t blocks
+) {
+    const long double epsilon =
+        std::numeric_limits<double>::epsilon();
+    const long double operations =
+        512.0L
+        + 4.0L * static_cast<long double>(sites)
+        + 2.0L * static_cast<long double>(blocks);
+    const long double product = operations * epsilon;
+    if (product >= 1.0L) {
+        return std::numeric_limits<double>::infinity();
+    }
+    const long double gamma = product / (1.0L - product);
+    if (gamma >= 1.0L) {
+        return std::numeric_limits<double>::infinity();
+    }
+    return std::nextafter(
+        static_cast<double>(
+            2.0L * gamma * magnitude / (1.0L - gamma)
+        ),
+        std::numeric_limits<double>::infinity()
+    );
+}
+
+inline void validateScoreBounds(
+    const std::vector<double>& expected,
+    const std::vector<double>& actual,
+    const std::vector<double>& errorBounds
+) {
+    if (
+        expected.size() != actual.size()
+        || expected.size() != errorBounds.size()
+    ) {
+        throw std::runtime_error("bounded score count mismatch");
+    }
+    for (size_t index = 0; index < expected.size(); ++index) {
+        if (
+            errorBounds[index] < 0
+            || std::abs(expected[index] - actual[index])
+                > errorBounds[index]
+        ) {
+            throw std::runtime_error(
+                "score exceeded error bound at index "
+                    + std::to_string(index)
+            );
+        }
+    }
+}
+
+inline ScoreDecision compareScoreEstimates(
+    double candidate,
+    double candidateError,
+    double incumbent,
+    double incumbentError,
+    double cpuCandidate,
+    double cpuIncumbent,
+    double tolerance
+) {
+    if (
+        candidateError < 0
+        || incumbentError < 0
+        || tolerance < 0
+    ) {
+        throw std::invalid_argument(
+            "score bounds and tolerance must be nonnegative"
+        );
+    }
+    if (
+        candidate - candidateError
+        > incumbent + incumbentError + tolerance
+    ) {
+        return {true, false};
+    }
+    if (
+        candidate + candidateError + tolerance
+        <= incumbent - incumbentError
+    ) {
+        return {false, false};
+    }
+    return {
+        cpuIncumbent + tolerance < cpuCandidate,
+        true
+    };
 }
 
 }

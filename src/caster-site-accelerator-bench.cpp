@@ -206,8 +206,12 @@ void requireConcurrentPrivateState(
 
 void requireProductionTapeReplay(
     Workflow& workflow,
-    const ResidentDataset& sourceDataset
+    const ResidentDataset& sourceDataset,
+    uint32_t blockSize
 ) {
+#if !defined(__HIPCC__) && !defined(__CUDACC__)
+    (void) blockSize;
+#endif
     ResidentDataset dataset = sourceDataset;
     dataset.initialColors.assign(dataset.taxa, -1);
     dataset.initialCounts.assign(dataset.sites * 12, 0);
@@ -244,7 +248,77 @@ void requireProductionTapeReplay(
               << recorder.batch().operations.size() << '\n';
     std::cout << "production_tape_scores="
               << recorder.batch().scoreCount << '\n';
+#if defined(__HIPCC__) || defined(__CUDACC__)
+    caster_accelerator::PortableHipExecutor hipExecutor(
+        dataset,
+        recorder.batch().operations.size(),
+        recorder.batch().scoreCount,
+        blockSize
+    );
+    const caster_accelerator::HipBatchResult hipReplay =
+        hipExecutor.execute(recorder.batch());
+    caster_accelerator::validateScoreBounds(
+        recorder.scores(),
+        hipReplay.scores,
+        hipReplay.errorBounds
+    );
+    requireEqualCounts(
+        caster_accelerator::productionCounts(placement.trip),
+        hipExecutor.downloadCounts()
+    );
+    double maximumError = 0.0;
+    double maximumBound = 0.0;
+    for (size_t index = 0; index < hipReplay.scores.size(); ++index) {
+        maximumError = std::max(
+            maximumError,
+            std::abs(recorder.scores()[index] - hipReplay.scores[index])
+        );
+        maximumBound = std::max(
+            maximumBound,
+            hipReplay.errorBounds[index]
+        );
+    }
+    std::cout << "production_tape_max_score_error="
+              << maximumError << '\n';
+    std::cout << "production_tape_max_error_bound="
+              << maximumBound << '\n';
+    std::cout << "production_tape_hip_validation=passed\n";
+#endif
     std::cout << "production_tape_validation=passed\n";
+}
+
+void requireNumericFallback() {
+    const caster_accelerator::ScoreDecision separated =
+        caster_accelerator::compareScoreEstimates(
+            2.0,
+            0.1,
+            1.0,
+            0.1,
+            2.0,
+            1.0,
+            ERROR_TOLERANCE
+        );
+    if (!separated.candidateBetter || separated.usedCpuFallback) {
+        throw std::runtime_error(
+            "separated score intervals did not use the device result"
+        );
+    }
+    const caster_accelerator::ScoreDecision nearTie =
+        caster_accelerator::compareScoreEstimates(
+            1.0000001,
+            0.001,
+            1.0,
+            0.001,
+            1.0,
+            1.0,
+            ERROR_TOLERANCE
+        );
+    if (nearTie.candidateBetter || !nearTie.usedCpuFallback) {
+        throw std::runtime_error(
+            "overlapping score intervals did not use CPU fallback"
+        );
+    }
+    std::cout << "numeric_fallback_validation=passed\n";
 }
 
 }
@@ -278,6 +352,15 @@ int main(int argc, char** argv) {
             "accelerator-block-size",
             256,
             "HIP workgroup size"
+        );
+        bool validateProductionTape = false;
+        ARG.addFlag(
+            0,
+            "accelerator-production-tape",
+            "Capture and replay one production placement search",
+            [&validateProductionTape]() {
+                validateProductionTape = true;
+            }
         );
         Workflow workflow(argc, argv);
 
@@ -341,7 +424,14 @@ int main(int argc, char** argv) {
             productionInitialCounts,
             productionInitialScore
         );
-        requireProductionTapeReplay(workflow, dataset);
+        requireNumericFallback();
+        if (validateProductionTape) {
+            requireProductionTapeReplay(
+                workflow,
+                dataset,
+                static_cast<uint32_t>(blockSize)
+            );
+        }
         initializeProduction(
             independentProduction,
             dataset.initialColors,
@@ -392,6 +482,11 @@ int main(int argc, char** argv) {
             productionInitialScore,
             hipInitialScore.scores
         );
+        caster_accelerator::validateScoreBounds(
+            productionInitialScore,
+            hipInitialScore.scores,
+            hipInitialScore.errorBounds
+        );
         double hipTapeUploadMilliseconds =
             hipInitialScore.tapeUploadMilliseconds;
         double hipKernelMilliseconds = hipInitialScore.kernelMilliseconds;
@@ -423,6 +518,11 @@ int main(int argc, char** argv) {
             caster_accelerator::validateScores(
                 expected.scores,
                 hipResult.scores
+            );
+            caster_accelerator::validateScoreBounds(
+                expected.scores,
+                hipResult.scores,
+                hipResult.errorBounds
             );
             hipTapeUploadMilliseconds +=
                 hipResult.tapeUploadMilliseconds;
