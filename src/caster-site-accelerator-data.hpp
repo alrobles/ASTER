@@ -521,7 +521,20 @@ inline void validateScores(
     if (expected.size() != actual.size()) {
         throw std::runtime_error("score count mismatch");
     }
+    if (expected.empty()) {
+        throw std::runtime_error(
+            "score validation requires nonempty score vectors"
+        );
+    }
     for (size_t index = 0; index < expected.size(); ++index) {
+        if (
+            !std::isfinite(expected[index])
+            || !std::isfinite(actual[index])
+        ) {
+            throw std::runtime_error(
+                "non-finite score at index " + std::to_string(index)
+            );
+        }
         const double absoluteDifference =
             std::abs(expected[index] - actual[index]);
         const double scale =
@@ -575,9 +588,24 @@ inline void validateScoreBounds(
     ) {
         throw std::runtime_error("bounded score count mismatch");
     }
+    if (expected.empty()) {
+        throw std::runtime_error(
+            "bounded score validation requires nonempty score vectors"
+        );
+    }
     for (size_t index = 0; index < expected.size(); ++index) {
         if (
-            errorBounds[index] < 0
+            !std::isfinite(expected[index])
+            || !std::isfinite(actual[index])
+        ) {
+            throw std::runtime_error(
+                "non-finite bounded score at index "
+                    + std::to_string(index)
+            );
+        }
+        if (
+            std::isnan(errorBounds[index])
+            || errorBounds[index] < 0
             || std::abs(expected[index] - actual[index])
                 > errorBounds[index]
         ) {
