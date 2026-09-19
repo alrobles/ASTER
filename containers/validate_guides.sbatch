@@ -34,8 +34,10 @@ make -C "$ROOT" -f GNUmakefile caster-site-strict
 run_case() {
     local label=$1
     local workers=$2
-    /usr/bin/time -v -o "$OUT_ROOT/$label.time" \
-        "$ROOT/bin/caster-site-strict" \
+    local started
+    local finished
+    started=$(date +%s.%N)
+    "$ROOT/bin/caster-site-strict" \
         -t 1 \
         --guide-workers "$workers" \
         -r 1 \
@@ -44,6 +46,10 @@ run_case() {
         "$INPUT" \
         > "$OUT_ROOT/$label.tree" \
         2> "$OUT_ROOT/$label.log"
+    finished=$(date +%s.%N)
+    awk -v started="$started" -v finished="$finished" \
+        'BEGIN { printf "%.6f\n", finished - started }' \
+        > "$OUT_ROOT/$label.elapsed_seconds"
 }
 
 run_case sequential 1
@@ -60,15 +66,5 @@ cmp "$OUT_ROOT/sequential.normalized.log" "$OUT_ROOT/concurrent.normalized.log"
 echo "guide_validation=passed"
 echo "guide_workers=$GUIDE_WORKERS"
 sha256sum "$OUT_ROOT/sequential.tree" "$OUT_ROOT/concurrent.tree"
-awk -F: '
-    /Elapsed \\(wall clock\\) time/ {
-        value=$2
-        for (i=3; i<=NF; i++) value=value ":" $i
-        gsub(/^[[:space:]]+/, "", value)
-        print FILENAME "=" value
-    }
-    /Maximum resident set size/ {
-        gsub(/^[[:space:]]+/, "", $2)
-        print FILENAME "_max_rss_kb=" $2
-    }
-' "$OUT_ROOT/sequential.time" "$OUT_ROOT/concurrent.time"
+echo "sequential_elapsed_seconds=$(cat "$OUT_ROOT/sequential.elapsed_seconds")"
+echo "concurrent_elapsed_seconds=$(cat "$OUT_ROOT/concurrent.elapsed_seconds")"
