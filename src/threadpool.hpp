@@ -80,6 +80,10 @@ public:
 			thread(worker, tasks[id - 1].get_future(), id).detach();
 		}
 	}
+
+	int threadCount() const {
+		return nThreads + 1;
+	}
 	
 	~ThreadPool(){
 		for (promise<shared_ptr<TaskBlock> > &task: tasks){

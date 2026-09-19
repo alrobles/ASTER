@@ -36,6 +36,7 @@ typedef int count_t;
 #endif
 
 #include "sequence.hpp"
+#define CASTER_CONCURRENT_GUIDES
 #include "algorithms.hpp"
 #include "sequtils.hpp"
 
