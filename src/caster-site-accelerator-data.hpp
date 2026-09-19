@@ -473,17 +473,17 @@ public:
 };
 
 inline std::vector<uint16_t> productionCounts(
-    const TripartitionInitializer& initializer
+    const Tripartition& tripartition
 ) {
     size_t sites = 0;
-    for (const TripartitionInitializer::Gene& gene : initializer.genes) {
+    for (const TripartitionInitializer::Gene& gene : tripartition.genes) {
         if (gene.nRep == 0) {
             sites += gene.nKernal;
         }
     }
     std::vector<uint16_t> counts;
     counts.reserve(sites * 12);
-    for (const TripartitionInitializer::Gene& gene : initializer.genes) {
+    for (const TripartitionInitializer::Gene& gene : tripartition.genes) {
         if (gene.nRep != 0) {
             throw std::invalid_argument(
                 "production counter extraction requires nRep == 0"

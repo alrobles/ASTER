@@ -7,7 +7,7 @@ CUDA_ARCH ?= sm_80
 HIP_NVIDIA_INCLUDE ?= /opt/hip/include
 ACCELERATOR_REFERENCE_BIN ?= bin/caster-site-accelerator-reference
 
-.PHONY: caster-site-portable caster-site-strict caster-site-kernel-reference caster-site-hip-bench caster-site-accelerator-reference caster-site-accelerator-hip caster-site-accelerator-cuda
+.PHONY: caster-site-portable caster-site-strict caster-site-kernel-reference caster-site-hip-bench caster-site-accelerator-reference caster-site-accelerator-sanitize caster-site-accelerator-tsan caster-site-accelerator-hip caster-site-accelerator-cuda
 
 caster-site-portable: dir
 	g++ -std=gnu++17 -O3 -ffast-math -pthread src/caster-site.cpp -o bin/caster-site-portable
@@ -23,6 +23,12 @@ caster-site-hip-bench: dir
 
 caster-site-accelerator-reference: dir
 	g++ -std=gnu++17 -O2 -fno-fast-math -ffp-contract=off -pthread src/caster-site-accelerator-bench.cpp -o $(ACCELERATOR_REFERENCE_BIN)
+
+caster-site-accelerator-sanitize: dir
+	g++ -std=gnu++17 -O1 -g -fno-omit-frame-pointer -fno-fast-math -ffp-contract=off -pthread -fsanitize=address,undefined src/caster-site-accelerator-bench.cpp -o bin/caster-site-accelerator-sanitize
+
+caster-site-accelerator-tsan: dir
+	g++ -std=gnu++17 -O1 -g -fno-omit-frame-pointer -fno-fast-math -ffp-contract=off -pthread -fsanitize=thread src/caster-site-accelerator-bench.cpp -o bin/caster-site-accelerator-tsan
 
 caster-site-accelerator-hip: dir
 	$(HIPCC) -std=gnu++17 -O2 -fno-fast-math -ffp-contract=off -pthread --offload-arch=$(HIP_ARCH) src/caster-site-accelerator-bench.cpp -o bin/caster-site-accelerator-hip

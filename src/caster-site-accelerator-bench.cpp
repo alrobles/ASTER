@@ -1,11 +1,13 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <future>
 #include <iomanip>
 #include <iostream>
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "caster-site-workflow.hpp"
@@ -151,6 +153,34 @@ void requireInvalidTapeChecks(const ResidentDataset& dataset) {
     }
 }
 
+void requireConcurrentPrivateState(
+    TripartitionInitializer& initializer,
+    const std::vector<int8_t>& colors,
+    int threads,
+    const std::vector<uint16_t>& expectedCounts,
+    const std::vector<double>& expectedScores
+) {
+    const auto run = [&initializer, &colors, threads]() {
+        Tripartition tripartition(initializer);
+        const std::vector<double> scores =
+            initializeProduction(tripartition, colors, threads);
+        return std::make_pair(
+            caster_accelerator::productionCounts(tripartition),
+            scores
+        );
+    };
+    std::future<std::pair<std::vector<uint16_t>, std::vector<double>>> first =
+        std::async(std::launch::async, run);
+    std::future<std::pair<std::vector<uint16_t>, std::vector<double>>> second =
+        std::async(std::launch::async, run);
+    const auto firstResult = first.get();
+    const auto secondResult = second.get();
+    requireEqualCounts(expectedCounts, firstResult.first);
+    requireEqualCounts(expectedCounts, secondResult.first);
+    caster_accelerator::validateScores(expectedScores, firstResult.second);
+    caster_accelerator::validateScores(expectedScores, secondResult.second);
+}
+
 }
 
 int main(int argc, char** argv) {
@@ -227,9 +257,36 @@ int main(int argc, char** argv) {
                 dataset.initialColors,
                 workflow.tripInit.nThreads
             );
+        const std::vector<uint16_t> productionInitialCounts =
+            caster_accelerator::productionCounts(production);
         requireEqualCounts(
-            caster_accelerator::productionCounts(workflow.tripInit),
+            productionInitialCounts,
             dataset.initialCounts
+        );
+        Tripartition independentProduction(workflow.tripInit);
+        requireEqualCounts(
+            productionInitialCounts,
+            caster_accelerator::productionCounts(production)
+        );
+        requireConcurrentPrivateState(
+            workflow.tripInit,
+            dataset.initialColors,
+            workflow.tripInit.nThreads,
+            productionInitialCounts,
+            productionInitialScore
+        );
+        initializeProduction(
+            independentProduction,
+            dataset.initialColors,
+            workflow.tripInit.nThreads
+        );
+        requireEqualCounts(
+            productionInitialCounts,
+            caster_accelerator::productionCounts(independentProduction)
+        );
+        requireEqualCounts(
+            productionInitialCounts,
+            caster_accelerator::productionCounts(production)
         );
 
         caster_accelerator::CpuResidentExecutor executor(dataset);
@@ -309,7 +366,7 @@ int main(int argc, char** argv) {
                 hipResult.hostReductionMilliseconds;
 #endif
             requireEqualCounts(
-                caster_accelerator::productionCounts(workflow.tripInit),
+                caster_accelerator::productionCounts(production),
                 executor.currentCounts()
             );
             productionMilliseconds += expected.milliseconds;
@@ -319,7 +376,7 @@ int main(int argc, char** argv) {
 
 #ifdef __HIPCC__
         requireEqualCounts(
-            caster_accelerator::productionCounts(workflow.tripInit),
+            caster_accelerator::productionCounts(production),
             hipExecutor.downloadCounts()
         );
         hipDeviceProp_t properties{};
@@ -365,6 +422,8 @@ int main(int argc, char** argv) {
                   << hipHostReductionMilliseconds << '\n';
 #endif
         std::cout << "invalid_input_validation=passed\n";
+        std::cout << "private_state_validation=passed\n";
+        std::cout << "concurrent_private_state_validation=passed\n";
         std::cout << "validation=passed\n";
         return 0;
     }
