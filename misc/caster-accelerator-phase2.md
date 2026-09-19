@@ -166,6 +166,26 @@ Before starting a concurrent batch, the scheduler computes:
 Oversubscription must reduce concurrency or select CPU fallback. It must not
 permit allocator failure as normal flow.
 
+## Concurrent guide execution
+
+`--guide-workers` controls the number of initial guide searches that may run
+at once. The default is one, preserving the existing resource profile.
+
+Before any guide starts, the coordinator generates every guide order on the
+main thread using the original RNG stream. Each worker then owns its
+`PlacementAlgorithm`, `Tripartition`, and `ThreadPool`. Workers do not write
+progress logs. Results and NNI counters are retained by guide index, logged
+in that order, and merged in that order.
+
+CPU allocations should provide approximately:
+
+```text
+guide_workers * threads
+```
+
+hardware threads. Increasing `--guide-workers` without increasing the Slurm
+CPU allocation oversubscribes the node.
+
 ## Instrumentation
 
 Report separately:
