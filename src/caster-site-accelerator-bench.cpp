@@ -4,6 +4,7 @@
 #include <future>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -174,6 +175,114 @@ void requireInvalidTapeChecks(const ResidentDataset& dataset) {
         catch (const std::invalid_argument&) {
         }
     }
+}
+
+void expectScoreRejection(
+    const std::vector<double>& expected,
+    const std::vector<double>& actual,
+    const char* label
+) {
+    bool rejected = false;
+    try {
+        caster_accelerator::validateScores(expected, actual);
+    }
+    catch (const std::exception&) {
+        rejected = true;
+    }
+    if (!rejected) {
+        throw std::runtime_error(
+            std::string("score validation accepted ") + label
+        );
+    }
+}
+
+void expectBoundedScoreRejection(
+    const std::vector<double>& expected,
+    const std::vector<double>& actual,
+    const std::vector<double>& errorBounds,
+    const char* label
+) {
+    bool rejected = false;
+    try {
+        caster_accelerator::validateScoreBounds(
+            expected,
+            actual,
+            errorBounds
+        );
+    }
+    catch (const std::exception&) {
+        rejected = true;
+    }
+    if (!rejected) {
+        throw std::runtime_error(
+            std::string("bounded score validation accepted ") + label
+        );
+    }
+}
+
+void requireInvalidScoreChecks() {
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double infinity = std::numeric_limits<double>::infinity();
+    const std::vector<double> reference{1.0, -2.0};
+    const std::vector<double> bounds{0.5, 0.5};
+    for (const double bad : {nan, infinity, -infinity}) {
+        std::vector<double> poisoned = reference;
+        poisoned[0] = bad;
+        expectScoreRejection(reference, poisoned, "a non-finite score");
+        // identical non-finite scores on both sides passed before the
+        // finite check: NaN - NaN is NaN, and NaN > tolerance is false
+        expectScoreRejection(poisoned, poisoned, "identical non-finite scores");
+        expectBoundedScoreRejection(
+            reference,
+            poisoned,
+            bounds,
+            "a non-finite bounded score"
+        );
+    }
+    // NaN bounds previously passed silently; infinite bounds stay legal
+    // because conservativeScoreErrorBound uses +inf as an unbounded signal
+    expectBoundedScoreRejection(
+        reference,
+        reference,
+        {0.5, nan},
+        "a NaN error bound"
+    );
+    expectBoundedScoreRejection(
+        reference,
+        reference,
+        {0.5, -0.5},
+        "a negative error bound"
+    );
+    caster_accelerator::validateScoreBounds(
+        reference,
+        reference,
+        {0.5, infinity}
+    );
+    // a batch carrying only updates is not a score experiment
+    expectScoreRejection({}, {}, "empty score vectors");
+    expectBoundedScoreRejection({}, {}, {}, "empty bounded score vectors");
+    expectScoreRejection(reference, {1.0}, "a score count mismatch");
+    expectBoundedScoreRejection(
+        reference,
+        {1.0},
+        bounds,
+        "a bounded score count mismatch"
+    );
+    expectScoreRejection(
+        reference,
+        {1.0, -3.0},
+        "an out-of-tolerance score"
+    );
+    expectBoundedScoreRejection(
+        reference,
+        {1.0, -4.0},
+        bounds,
+        "a score beyond its error bound"
+    );
+    // positive controls: in-tolerance and inside-bound pairs must pass
+    caster_accelerator::validateScores(reference, {1.0 + 5e-7, -2.0});
+    caster_accelerator::validateScoreBounds(reference, {1.2, -2.1}, bounds);
+    std::cout << "invalid_score_validation=passed\n";
 }
 
 void requireConcurrentPrivateState(
@@ -390,6 +499,7 @@ int main(int argc, char** argv) {
             dataset.initialColors
         );
         requireInvalidTapeChecks(dataset);
+        requireInvalidScoreChecks();
         const std::vector<TapeBatch> batches =
             caster_accelerator::generateTapeBatches(
                 dataset.initialColors,
